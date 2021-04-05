@@ -6,6 +6,7 @@ using System.Threading;
 using Microsoft.CodeAnalysis.Text;
 using Roslyn.Utilities;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.PooledObjects;
 
 namespace Pchp.CodeAnalysis.Symbols
 {
@@ -26,7 +27,7 @@ namespace Pchp.CodeAnalysis.Symbols
 
         // Only when the caller passes allowAlpha=true do we tolerate substituted (alpha-renamed) type parameters as keys
         internal TypeMap(ImmutableArray<TypeParameterSymbol> from, ImmutableArray<TypeParameterSymbol> to, bool allowAlpha = false)
-            : this(from, to.SelectAsArray(TypeSymbolAsTypeWithModifiers), allowAlpha)
+            : this(from, Microsoft.CodeAnalysis.ImmutableArrayExtensions.SelectAsArray(to, TypeSymbolAsTypeWithModifiers), allowAlpha)
         {
             // mapping contents are read-only hereafter
         }
@@ -143,20 +144,11 @@ namespace Pchp.CodeAnalysis.Symbols
             return mapping;
         }
 
-        public ImmutableArray<ImmutableArray<CustomModifier>> GetTypeArgumentsCustomModifiersFor(NamedTypeSymbol originalDefinition)
+        public ImmutableArray<CustomModifier> GetTypeArgumentsCustomModifiersFor(TypeParameterSymbol originalDefinition)
         {
             Debug.Assert((object)originalDefinition != null);
             Debug.Assert(originalDefinition.IsDefinition);
-            Debug.Assert(originalDefinition.Arity > 0);
-
-            var result = ArrayBuilder<ImmutableArray<CustomModifier>>.GetInstance(originalDefinition.Arity);
-
-            foreach (TypeParameterSymbol tp in originalDefinition.TypeArguments)
-            {
-                result.Add(SubstituteTypeParameter(tp).CustomModifiers);
-            }
-
-            return result.ToImmutableAndFree();
+            return SubstituteTypeParameter(originalDefinition).CustomModifiers;
         }
     }
 }

@@ -58,9 +58,14 @@ namespace Pchp.CodeAnalysis.Symbols
         public override ImmutableArray<Symbol> GetMembers(string name)
         {
             return
-                (name == _constructor.Name) ? ImmutableArray.Create<Symbol>(_constructor) :
-                (name == _invoke.Name) ? ImmutableArray.Create<Symbol>(_invoke) :
+                (name.StringsEqual(_constructor.Name, false)) ? ImmutableArray.Create<Symbol>(_constructor) :
+                (name.StringsEqual(_invoke.Name, false)) ? ImmutableArray.Create<Symbol>(_invoke) :
                 ImmutableArray<Symbol>.Empty;
+        }
+
+        public override ImmutableArray<Symbol> GetMembersByPhpName(string name)
+        {
+            return base.GetMembersByPhpName(name); // none
         }
 
         public override Accessibility DeclaredAccessibility
@@ -216,6 +221,14 @@ namespace Pchp.CodeAnalysis.Symbols
                 get { return false; }
             }
 
+            public override RefKind RefKind
+            {
+                get
+                {
+                    return RefKind.None;
+                }
+            }
+
             public override TypeSymbol ReturnType
             {
                 get { return _returnType; }
@@ -269,11 +282,6 @@ namespace Pchp.CodeAnalysis.Symbols
             public override Symbol ContainingSymbol
             {
                 get { return _containingType; }
-            }
-
-            public override ImmutableArray<Location> Locations
-            {
-                get { return ImmutableArray<Location>.Empty; }
             }
 
             public override Accessibility DeclaredAccessibility

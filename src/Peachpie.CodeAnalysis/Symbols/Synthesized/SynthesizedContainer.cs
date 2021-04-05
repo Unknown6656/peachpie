@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using Roslyn.Utilities;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.PooledObjects;
 
 namespace Pchp.CodeAnalysis.Symbols
 {
@@ -50,17 +51,15 @@ namespace Pchp.CodeAnalysis.Symbols
             var typeParameters = ArrayBuilder<TypeParameterSymbol>.GetInstance(parameterCount + (returnsVoid ? 0 : 1));
             if (parameterCount != 0)
             {
-                throw new NotImplementedException();
-                //for (int i = 0; i < parameterCount; i++)
-                //{
-                //    typeParameters.Add(new AnonymousTypeManager.AnonymousTypeParameterSymbol(this, i, "T" + (i + 1)));
-                //}
+                for (int i = 0; i < parameterCount; i++)
+                {
+                    typeParameters.Add(new AnonymousTypeParameterSymbol(this, i, "T" + (i + 1)));
+                }
             }
 
             if (!returnsVoid)
             {
-                //typeParameters.Add(new AnonymousTypeManager.AnonymousTypeParameterSymbol(this, parameterCount, "TResult"));
-                throw new NotImplementedException();
+                typeParameters.Add(new AnonymousTypeParameterSymbol(this, parameterCount, "TResult"));
             }
 
             return typeParameters.ToImmutableAndFree();
@@ -110,11 +109,6 @@ namespace Pchp.CodeAnalysis.Symbols
             get { return _name; }
         }
 
-        public override ImmutableArray<Location> Locations
-        {
-            get { return ImmutableArray<Location>.Empty; }
-        }
-
         public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences
         {
             get { return ImmutableArray<SyntaxReference>.Empty; }
@@ -140,26 +134,16 @@ namespace Pchp.CodeAnalysis.Symbols
             get { return (object)Constructor == null; }
         }
 
+        public override bool IsSerializable => false;
+
         public override ImmutableArray<TypeSymbol> TypeArguments
         {
             get { return StaticCast<TypeSymbol>.From(TypeParameters); }
         }
 
-        //internal override bool HasTypeArgumentsCustomModifiers
-        //{
-        //    get
-        //    {
-        //        return false;
-        //    }
-        //}
+        internal override bool HasTypeArgumentsCustomModifiers => false;
 
-        //internal override ImmutableArray<ImmutableArray<CustomModifier>> TypeArgumentsCustomModifiers
-        //{
-        //    get
-        //    {
-        //        return CreateEmptyTypeArgumentsCustomModifiers();
-        //    }
-        //}
+        public override ImmutableArray<CustomModifier> GetTypeArgumentCustomModifiers(int ordinal) => GetEmptyTypeArgumentCustomModifiers(ordinal);
 
         public override ImmutableArray<Symbol> GetMembers()
         {
@@ -171,6 +155,11 @@ namespace Pchp.CodeAnalysis.Symbols
         {
             var ctor = Constructor;
             return ((object)ctor != null && name == ctor.Name) ? ImmutableArray.Create<Symbol>(ctor) : ImmutableArray<Symbol>.Empty;
+        }
+
+        public override ImmutableArray<Symbol> GetMembersByPhpName(string name)
+        {
+            return ImmutableArray<Symbol>.Empty;
         }
 
         internal override IEnumerable<IFieldSymbol> GetFieldsToEmit()
@@ -236,13 +225,8 @@ namespace Pchp.CodeAnalysis.Symbols
 
         internal override ImmutableArray<NamedTypeSymbol> GetInterfacesToEmit()
         {
-            throw new NotImplementedException();
+            return CalculateInterfacesToEmit();
         }
-
-        //internal override ImmutableArray<NamedTypeSymbol> GetInterfacesToEmit()
-        //{
-        //    return CalculateInterfacesToEmit();
-        //}
 
         public override NamedTypeSymbol BaseType //NoUseSiteDiagnostics
         {

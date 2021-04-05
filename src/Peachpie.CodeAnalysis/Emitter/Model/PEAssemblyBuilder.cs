@@ -4,14 +4,16 @@ using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Reflection;
 using Microsoft.CodeAnalysis.Emit;
+using Microsoft.CodeAnalysis.PooledObjects;
 using Roslyn.Utilities;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.Symbols;
 using Cci = Microsoft.Cci;
 using Pchp.CodeAnalysis.Symbols;
 
 namespace Pchp.CodeAnalysis.Emit
 {
-    internal sealed class PEAssemblyBuilder : PEModuleBuilder, Cci.IAssembly
+    internal sealed class PEAssemblyBuilder : PEModuleBuilder, Cci.IAssemblyReference
     {
         readonly SourceAssemblySymbol _sourceAssembly;
         ImmutableArray<Cci.IFileReference> _lazyFiles;
@@ -49,11 +51,6 @@ namespace Pchp.CodeAnalysis.Emit
             AssemblyOrModuleSymbolToModuleRefMap.Add(sourceAssembly, this);
         }
 
-        public override void Dispatch(Cci.MetadataVisitor visitor)
-        {
-            visitor.Visit((Cci.IAssembly)this);
-        }
-
         public AssemblyContentType ContentType => _sourceAssembly.Identity.ContentType;
 
         public string Culture => _sourceAssembly.Identity.CultureName;
@@ -87,12 +84,18 @@ namespace Pchp.CodeAnalysis.Emit
 
         public override string Name => _metadataName;
 
+        public AssemblyIdentity Identity => _sourceAssembly.Identity;
+
+        public Version AssemblyVersionPattern => _sourceAssembly.AssemblyVersionPattern;
+
+        public override ISourceAssemblySymbolInternal SourceAssemblyOpt => _sourceAssembly;
+
         /// <summary>
         /// A list of the files that constitute the assembly. These are not the source language files that may have been
         /// used to compile the assembly, but the files that contain constituent modules of a multi-module assembly as well
         /// as any external resources. It corresponds to the File table of the .NET assembly file format.
         /// </summary>
-        public IEnumerable<Cci.IFileReference> GetFiles(EmitContext context)
+        public override IEnumerable<Cci.IFileReference> GetFiles(EmitContext context)
         {
             if (_lazyFiles.IsDefault)
             {
@@ -102,7 +105,7 @@ namespace Pchp.CodeAnalysis.Emit
                     var modules = _sourceAssembly.Modules;
                     for (int i = 1; i < modules.Length; i++)
                     {
-                        builder.Add((Cci.IFileReference)Translate(modules[i] as IAssemblySymbol, context.Diagnostics));
+                        builder.Add((Cci.IFileReference)Translate(modules[i] as IAssemblySymbolInternal, context.Diagnostics));
                     }
 
                     foreach (ResourceDescription resource in ManifestResources)
@@ -138,7 +141,7 @@ namespace Pchp.CodeAnalysis.Emit
 
             for (int i = 1; i < count; i++)
             {
-                var file = (Cci.IFileReference)Translate(modules[i] as IAssemblySymbol, diagnostics);
+                var file = (Cci.IFileReference)Translate(modules[i] as IAssemblySymbolInternal, diagnostics);
 
                 //try
                 //{

@@ -1,4 +1,5 @@
 ﻿using Pchp.CodeAnalysis.FlowAnalysis;
+using Pchp.CodeAnalysis.Semantics;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -11,6 +12,14 @@ namespace Pchp.CodeAnalysis.Symbols
     /// </summary>
     public interface IPhpValue
     {
-        
+        /// <summary>
+        /// Optional. Gets the initializer.
+        /// </summary>
+        BoundExpression Initializer { get; }
+
+        /// <summary>
+        /// Gets flag indicating the value cannot be <c>NULL</c>.
+        /// </summary>
+        bool HasNotNull { get; }
     }
 }

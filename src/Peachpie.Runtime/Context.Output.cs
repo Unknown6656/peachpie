@@ -15,12 +15,22 @@ namespace Pchp.Core
         /// Initialize output of this context.
         /// To be used by the context constructor.
         /// </summary>
-        /// <param name="output"></param>
-        protected void InitOutput(Stream output)
+        protected void InitOutput(Stream output, TextWriter textoutput = null, bool enableOutputBuffering = false)
         {
             // setups Output and OutputStream
-            _textSink = new StreamWriter(_streamSink = output ?? Stream.Null);
-            IsOutputBuffered = false;
+            if (output != null)
+            {
+                _streamSink = output;
+                _textSink = textoutput ?? new StreamWriter(output);
+            }
+            else
+            {
+                _streamSink = Stream.Null;
+                _textSink = TextWriter.Null;
+            }
+
+            //
+            IsOutputBuffered = enableOutputBuffering;
         }
 
         /// <summary>
@@ -42,7 +52,7 @@ namespace Pchp.Core
         BufferedOutput _bufferedOutput;
 
         BufferedOutput EnsureBufferedOutput(bool enableBuffering)
-            => _bufferedOutput ?? (_bufferedOutput = new BufferedOutput(enableBuffering, _textSink, _streamSink, this.StringEncoding));
+            => _bufferedOutput ?? (_bufferedOutput = new BufferedOutput(this, enableBuffering, _textSink, _streamSink));
 
         /// <summary>
         /// Stream where text output will be sent.
@@ -133,21 +143,22 @@ namespace Pchp.Core
         public void Echo(object value)
         {
             if (value != null)
-                Echo(value.ToString());
+            {
+                Echo(Convert.ToString(value));
+            }
         }
 
         public void Echo(string value)
         {
             if (value != null)
+            {
                 Output.Write(value);
+            }
         }
 
         public void Echo(PhpString value) => value.Output(this);
 
-        public void Echo(PhpValue value)
-        {
-            Output.Write(value.ToString(this)); // TODO: echo byte[] properly
-        }
+        public void Echo(PhpValue value) => value.Output(this);
 
         public void Echo(PhpNumber value)
         {
@@ -159,17 +170,28 @@ namespace Pchp.Core
 
         public void Echo(double value)
         {
-            Output.Write(Convert.ToString(value, this));
+            Output.Write(Convert.ToString(value));
         }
 
         public void Echo(long value)
         {
-            Output.Write(value);
+            // use the invariant number format
+            // the underlying TextWriter converts numbers using Current Culture
+
+            Output.Write(Convert.ToString(value));
         }
 
         public void Echo(int value)
         {
-            Output.Write(value);
+            Output.Write(Convert.ToString(value));
+        }
+
+        public void Echo(bool value)
+        {
+            if (value)
+            {
+                Output.Write('1');
+            }
         }
 
         #endregion

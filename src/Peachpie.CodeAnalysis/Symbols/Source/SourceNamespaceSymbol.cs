@@ -30,7 +30,7 @@ namespace Pchp.CodeAnalysis.Symbols
 
         public override AssemblySymbol ContainingAssembly => _sourceModule.ContainingAssembly;
 
-        internal override IModuleSymbol ContainingModule => _sourceModule;
+        internal override ModuleSymbol ContainingModule => _sourceModule;
 
         public override Symbol ContainingSymbol => _sourceModule;
 
@@ -62,6 +62,11 @@ namespace Pchp.CodeAnalysis.Symbols
             throw new NotImplementedException();
         }
 
+        public override ImmutableArray<Symbol> GetMembersByPhpName(string name)
+        {
+            throw new NotImplementedException();
+        }
+
         public override ImmutableArray<NamedTypeSymbol> GetTypeMembers()
         {
             throw new NotImplementedException();
@@ -76,7 +81,7 @@ namespace Pchp.CodeAnalysis.Symbols
     internal class SourceGlobalNamespaceSymbol : NamespaceSymbol
     {
         readonly SourceModuleSymbol _sourceModule;
-        
+
         public SourceGlobalNamespaceSymbol(SourceModuleSymbol module)
         {
             _sourceModule = module;
@@ -92,7 +97,7 @@ namespace Pchp.CodeAnalysis.Symbols
 
         public override AssemblySymbol ContainingAssembly => _sourceModule.ContainingAssembly;
 
-        internal override IModuleSymbol ContainingModule => _sourceModule;
+        internal override ModuleSymbol ContainingModule => _sourceModule;
 
         public override Symbol ContainingSymbol => _sourceModule;
 
@@ -126,15 +131,36 @@ namespace Pchp.CodeAnalysis.Symbols
             throw new NotImplementedException();
         }
 
+        public override ImmutableArray<Symbol> GetMembersByPhpName(string name)
+        {
+            throw new NotImplementedException();
+        }
+
         public override ImmutableArray<NamedTypeSymbol> GetTypeMembers()
         {
-            return _sourceModule.SymbolTables.GetTypes().AsImmutable();
+            return _sourceModule.SymbolCollection.GetTypes().Cast<NamedTypeSymbol>().AsImmutable();
         }
 
         public override ImmutableArray<NamedTypeSymbol> GetTypeMembers(string name)
         {
-            var x = _sourceModule.SymbolTables.GetType(NameUtils.MakeQualifiedName(name, true));
-            return (x != null) ? ImmutableArray.Create(x) : ImmutableArray<NamedTypeSymbol>.Empty;
+            var x = _sourceModule.SymbolCollection.GetType(NameUtils.MakeQualifiedName(name, true));
+            if (x != null)
+            {
+                if (x.IsErrorType())
+                {
+                    var candidates = ((ErrorTypeSymbol)x).CandidateSymbols;
+                    if (candidates.Length != 0)
+                    {
+                        return candidates.OfType<NamedTypeSymbol>().AsImmutable();
+                    }
+                }
+                else
+                {
+                    return ImmutableArray.Create(x);
+                }
+            }
+
+            return ImmutableArray<NamedTypeSymbol>.Empty;
         }
     }
 }

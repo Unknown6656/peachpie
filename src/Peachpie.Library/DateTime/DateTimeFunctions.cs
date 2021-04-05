@@ -7,9 +7,11 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using System_DateTime = System.DateTime;
+using System.IO;
 
-namespace Pchp.Library
+namespace Pchp.Library.DateTime
 {
+    [PhpExtension(PhpExtensionAttribute.KnownExtensionNames.Date)]
     public static class DateTimeFunctions
     {
         /// <summary>
@@ -18,6 +20,30 @@ namespace Pchp.Library
 		internal static System_DateTime GetNow(Context ctx)
         {
             return TimeZoneInfo.ConvertTime(System_DateTime.UtcNow, PhpTimeZone.GetCurrentTimeZone(ctx));
+        }
+
+        internal static int CompareTime(DateTimeInterface self, PhpValue value)
+        {
+            if (value.AsObject() is DateTimeInterface dti)
+            {
+                return CompareTime(self, dti);
+            }
+            else
+            {
+                return 1;
+            }
+
+            //
+            throw new ArgumentException();
+            //return 1;
+        }
+
+        internal static int CompareTime(DateTimeInterface first, DateTimeInterface second)
+        {
+            var dt1 = GetDateTimeUtcFromInterface(first);
+            var dt2 = GetDateTimeUtcFromInterface(second);
+
+            return dt1.CompareTo(dt2);
         }
 
         #region Constants
@@ -40,23 +66,218 @@ namespace Pchp.Library
 
         public const string DATE_RFC3339 = @"Y-m-d\TH:i:sP";
 
-        public const string DATE_RSS = @"D, d M Y H:i:s T";
+        public const string DATE_RFC7231 = @"D, d M Y H:i:s \G\M\T";
 
-        public const string DATE_W3C = @"Y-m-d\TH:i:sO";
+        public const string DATE_RFC3339_EXTENDED = @"Y-m-d\TH:i:s.vP";
+
+        public const string DATE_RSS = @"D, d M Y H:i:s O";
+
+        public const string DATE_W3C = @"Y-m-d\TH:i:sP";
+
+        #endregion
+
+        #region date_format, date_create, date_create_immutable, date_offset_get, date_modify, date_add, date_sub, date_diff, date_timestamp_set, date_timestamp_get
+
+        [return: CastToFalse]
+        public static string date_format(DateTime datetime, string format) => datetime.format(format);
+
+        /// <summary>
+        /// Alias of new <see cref="DateTime"/> but not throwing exception.
+        /// </summary>
+        [return: CastToFalse]
+        public static DateTime date_create(Context/*!*/ctx, string time = null, DateTimeZone timezone = null)
+        {
+            try
+            {
+                return new Library.DateTime.DateTime(ctx, time, timezone);
+            }
+            catch (Spl.Exception)
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Alias of new <see cref="DateTimeImmutable"/> but not throwing exception.
+        /// </summary>
+        [return: CastToFalse]
+        public static DateTimeImmutable date_create_immutable(Context/*!*/ctx, string time = null, DateTimeZone timezone = null)
+        {
+            try
+            {
+                return new Library.DateTime.DateTimeImmutable(ctx, time, timezone);
+            }
+            catch (Spl.Exception)
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Returns new DateTime object formatted according to the specified format.
+        /// </summary>
+        /// <param name="ctx"><see cref="ScriptContext"/> reference.</param>
+        /// <param name="format">The format that the passed in string should be in.</param>
+        /// <param name="time">String representing the time.</param>
+        /// <param name="timezone">A DateTimeZone object representing the desired time zone.</param>
+        /// <returns></returns>
+        [return: CastToFalse]
+        public static DateTime date_create_from_format(Context/*!*/ctx, string format, string time, DateTimeZone timezone = null)
+        {
+            return DateTime.createFromFormat(ctx, format, time, timezone);
+        }
+
+        /// <summary>
+        /// Returns new <see cref="DateTimeImmutable"/> object formatted according to the specified format.
+        /// </summary>
+        /// <param name="ctx"><see cref="ScriptContext"/> reference.</param>
+        /// <param name="format">The format that the passed in string should be in.</param>
+        /// <param name="time">String representing the time.</param>
+        /// <param name="timezone">A DateTimeZone object representing the desired time zone.</param>
+        /// <returns></returns>
+        [return: CastToFalse]
+        public static DateTimeImmutable date_create_immutable_from_format(Context/*!*/ctx, string format, string time, DateTimeZone timezone = null)
+        {
+            return DateTimeImmutable.createFromFormat(ctx, format, time, timezone);
+        }
+
+        /// <summary>
+        /// Alias of DateTime::getOffset().
+        /// </summary>
+        public static long date_offset_get(Library.DateTime.DateTime datetime)
+        {
+            if (datetime == null)
+            {
+                //PhpException.ArgumentNull(nameof(datetime));
+                throw new Spl.TypeError(string.Format(Core.Resources.ErrResources.invalid_argument_type, nameof(datetime), nameof(DateTimeInterface)));
+            }
+
+            return datetime.getOffset();
+        }
+
+        /// <summary>
+        /// Alias of DateTime::modify().
+        /// </summary>
+        [return: CastToFalse]
+        public static DateTime date_modify(Context/*!*/ctx, Library.DateTime.DateTime datetime, string modify) => datetime.modify(ctx, modify);
+
+        /// <summary>
+        /// Alias of <see cref="DateTime.add(DateInterval)"/>
+        /// </summary>
+        //[return: CastToFalse]
+        public static DateTime date_add(Library.DateTime.DateTime @object, DateInterval interval) => @object.add(interval);
+
+        /// <summary>
+        /// Subtracts an amount of days, months, years, hours, minutes and seconds from a DateTime object.
+        /// </summary>
+        //[return:CastToFalse]
+        public static DateTime date_sub(DateTime @object, DateInterval interval) => @object.sub(interval);
+
+        internal static System_DateTime GetDateTimeUtcFromInterface(DateTimeInterface dti)
+        {
+            if (GetDateTimeFromInterface(dti, out var datetime, out var tz))
+            {
+                return TimeZoneInfo.ConvertTimeToUtc(datetime, tz);
+            }
+
+            throw new ArgumentException();
+        }
+
+        internal static bool GetDateTimeFromInterface(DateTimeInterface dti, out System_DateTime datetime, out TimeZoneInfo timezone)
+        {
+            if (dti is Library.DateTime.DateTime dt)
+            {
+                datetime = dt.LocalTime;
+                timezone = dt.LocalTimeZone;
+                return true;
+            }
+
+            if (dti is DateTimeImmutable dtimmutable)
+            {
+                datetime = dtimmutable.LocalTime;
+                timezone = dtimmutable.LocalTimeZone;
+                return true;
+            }
+
+            datetime = default;
+            timezone = default;
+            return false;
+        }
+
+        /// <summary>
+        /// Returns the difference between two DateTime objects.
+        /// </summary>
+        public static DateInterval date_diff(DateTimeInterface datetime1, DateTimeInterface datetime2, bool absolute = false)
+        {
+            var dt1 = GetDateTimeUtcFromInterface(datetime1);
+            var dt2 = GetDateTimeUtcFromInterface(datetime2);
+
+            var interval = new DateInterval(dt1, dt2);
+            if (absolute)
+            {
+                interval.invert = 0;
+            }
+
+            return interval;
+        }
+
+        /// <summary>
+        /// Sets the date and time based on an Unix timestamp.
+        /// </summary>
+        /// <returns>Returns the <see cref="DateTime"/> object for method chaining.</returns>
+        public static DateTime date_timestamp_set(DateTime @object, long unixtimestamp) => @object.setTimestamp(unixtimestamp);
+
+        /// <summary>
+        /// Gets the date and time as Unix timestamp.
+        /// </summary>
+        public static long date_timestamp_get(DateTime @object) => @object.getTimestamp();
+
+        #endregion
+
+        #region
+
+        /// <summary>
+        /// Alias to <see cref="DateTime.setTime"/>.
+        /// </summary>
+        public static DateTime date_time_set(DateTime @object, int hour, int minute, int second)
+            => @object.setTime(hour, minute, second);
+
+        /// <summary>
+        /// Alias to <see cref="DateTime.setDate"/>.
+        /// </summary>
+        public static DateTime date_date_set(DateTime @object, int year, int month, int day)
+            => @object.setDate(year, month, day);
+
+        /// <summary>
+        /// Alias to <see cref="DateTime.setISODate"/>.
+        /// </summary>
+        public static DateTime date_isodate_set(DateTime @object, int year, int week, int day = 1)
+            => @object.setISODate(year, week, day);
+
+        #endregion
+
+        #region date_get_last_errors
+
+        /// <summary>Returns the warnings and errors.</summary>
+        /// <remarks>Unlike in PHP, we never return <c>FALSE</c>, according to the documentation and for (our) sanity.</remarks>
+        public static PhpArray date_get_last_errors(Context ctx) => DateTime.getLastErrors(ctx);
 
         #endregion
 
         #region date, idate, gmdate
 
         /// <summary>
-		/// Returns a string formatted according to the given format string using the current local time.
-		/// </summary>
-		/// <param name="ctx">Current runtime context.</param>
+        /// Returns a string formatted according to the given format string using the current local time.
+        /// </summary>
+        /// <param name="ctx">Current runtime context.</param>
         /// <param name="format">Format definition for output.</param>
-		/// <returns>Formatted string.</returns>
-		public static string date(Context ctx, string format)
+        /// <returns>Formatted string.</returns>
+        public static string date(Context ctx, string format)
         {
-            return FormatDate(format, System_DateTime.UtcNow, PhpTimeZone.GetCurrentTimeZone(ctx));
+            var localtz = PhpTimeZone.GetCurrentTimeZone(ctx);
+            var localtime = TimeZoneInfo.ConvertTimeFromUtc(System_DateTime.UtcNow, localtz);
+
+            return FormatDate(format, localtime, localtz);
         }
 
         /// <summary>
@@ -66,9 +287,12 @@ namespace Pchp.Library
         /// <param name="format">Format definition for output.</param>
         /// <param name="timestamp">Nuber of seconds since 1970 specifying a date.</param>
         /// <returns>Formatted string.</returns>
-        public static string date(Context ctx, string format, int timestamp)
+        public static string date(Context ctx, string format, long timestamp)
         {
-            return FormatDate(format, DateTimeUtils.UnixTimeStampToUtc(timestamp), PhpTimeZone.GetCurrentTimeZone(ctx));
+            var localtz = PhpTimeZone.GetCurrentTimeZone(ctx);
+            var localtime = TimeZoneInfo.ConvertTimeFromUtc(DateTimeUtils.UnixTimeStampToUtc(timestamp), localtz);
+
+            return FormatDate(format, localtime, localtz);
         }
 
         /// <summary>
@@ -87,7 +311,7 @@ namespace Pchp.Library
         /// <param name="format">Format definition for output.</param>
         /// <param name="timestamp">Nuber of seconds since 1970 specifying a date.</param>
         /// <returns>Formatted string.</returns>
-        public static string gmdate(string format, int timestamp)
+        public static string gmdate(string format, long timestamp)
         {
             return FormatDate(format, DateTimeUtils.UnixTimeStampToUtc(timestamp), DateTimeUtils.UtcTimeZone);
         }
@@ -98,7 +322,7 @@ namespace Pchp.Library
         /// <param name="ctx">Current runtime context.</param>
         /// <param name="format">Format definition for output.</param>
         /// <returns>Part of the date, e.g. month or hours.</returns>
-        public static int idate(Context ctx, string format)
+        public static long idate(Context ctx, string format)
         {
             if (format == null || format.Length != 1)
                 //PhpException.InvalidArgument("format");
@@ -114,7 +338,7 @@ namespace Pchp.Library
         /// <param name="format">Format definition for output.</param>
         /// <param name="timestamp">Nuber of seconds since 1970 specifying a date.</param>
         /// <returns>Part of the date, e.g. month or hours.</returns>
-        public static int idate(Context ctx, string format, int timestamp)
+        public static long idate(Context ctx, string format, long timestamp)
         {
             if (format == null || format.Length != 1)
                 //PhpException.InvalidArgument("format");
@@ -123,7 +347,7 @@ namespace Pchp.Library
             return GetDatePart(format[0], DateTimeUtils.UnixTimeStampToUtc(timestamp), PhpTimeZone.GetCurrentTimeZone(ctx));
         }
 
-        private static int GetDatePart(char format, System_DateTime utc, TimeZoneInfo/*!*/ zone)
+        private static long GetDatePart(char format, System_DateTime utc, TimeZoneInfo/*!*/ zone)
         {
             var local = TimeZoneInfo.ConvertTime(utc, zone);// zone.ToLocalTime(utc);
 
@@ -169,7 +393,7 @@ namespace Pchp.Library
                     return local.Second;
 
                 case 't':
-                    return System_DateTime.DaysInMonth(local.Year, local.Month);
+                    return DateInfo.DaysInMonthFixed(local.Year, local.Month);
 
                 case 'U':
                     return DateTimeUtils.UtcToUnixTimeStamp(utc);
@@ -196,7 +420,7 @@ namespace Pchp.Library
                     return local.DayOfYear - 1;
 
                 case 'Z':
-                    return (int)zone.GetUtcOffset(local).TotalSeconds;
+                    return (long)zone.GetUtcOffset(local).TotalSeconds;
 
                 default:
                     //PhpException.InvalidArgument("format");
@@ -205,21 +429,23 @@ namespace Pchp.Library
             }
         }
 
-        internal static string FormatDate(string format, System_DateTime utc, TimeZoneInfo zone)
+        internal static string FormatDate(string format, System_DateTime local, TimeZoneInfo zone)
         {
             Debug.Assert(zone != null);
 
-            if (format == null)
+            if (string.IsNullOrEmpty(format))
+            {
                 return string.Empty;
-
-            var local = TimeZoneInfo.ConvertTime(utc, zone);
+            }
 
             // here we are creating output string
-            StringBuilder result = new StringBuilder();
-            bool escape = false;
+            var escape = false;
+            var result = StringBuilderUtilities.Pool.Get();
 
-            foreach (char ch in format)
+            for (int i = 0; i < format.Length; i++)
             {
+                var ch = format[i];
+
                 if (escape)
                 {
                     result.Append(ch);
@@ -241,7 +467,7 @@ namespace Pchp.Library
 
                     case 'B':
                         // Swatch Beat (Internet Time) - 000 through 999
-                        result.AppendFormat("{0:000}", GetSwatchBeat(utc));
+                        result.AppendFormat("{0:000}", GetSwatchBeat(TimeZoneInfo.ConvertTimeToUtc(local, zone)));
                         break;
 
                     case 'c':
@@ -260,10 +486,9 @@ namespace Pchp.Library
                         break;
 
                     case 'e':
-                        // Timezone identifier (added in PHP 5.1.0)
-                        //result.Append(zone.Id);
-                        //break;
-                        throw new NotImplementedException();
+                        // Timezone identifier(added in PHP 5.1.0)
+                        result.Append(zone.Id);
+                        break;
 
                     case 'D':
                         // A textual representation of a day, three letters - Mon through Sun
@@ -387,7 +612,7 @@ namespace Pchp.Library
 
                     case 't':
                         // Number of days in the given month 28 through 31
-                        result.Append(System_DateTime.DaysInMonth(local.Year, local.Month));
+                        result.Append(DateInfo.DaysInMonthFixed(local.Year, local.Month));
                         break;
 
                     case 'T':
@@ -397,12 +622,12 @@ namespace Pchp.Library
 
                     case 'U':
                         // Seconds since the Unix Epoch (January 1 1970 00:00:00 GMT)
-                        result.Append(DateTimeUtils.UtcToUnixTimeStamp(utc));
+                        result.Append(DateTimeUtils.UtcToUnixTimeStamp(TimeZoneInfo.ConvertTimeToUtc(local, zone)));
                         break;
 
                     case 'u':
                         // Microseconds (added in PHP 5.2.2)
-                        result.Append((utc.Millisecond / 1000).ToString("D6"));
+                        result.Append((local.Millisecond / 1000).ToString("D6"));
                         break;
 
                     case 'w':
@@ -454,7 +679,7 @@ namespace Pchp.Library
             if (escape)
                 result.Append('\\');
 
-            return result.ToString();
+            return StringBuilderUtilities.GetStringAndReturn(result);
         }
 
         /// <summary>
@@ -492,8 +717,8 @@ namespace Pchp.Library
 
         static int GetSwatchBeat(System_DateTime utc)
         {
-            int seconds = DateTimeUtils.UtcToUnixTimeStamp(utc);
-            int beat = (int)(((seconds - (seconds - ((seconds % 86400) + 3600))) * 10) / 864) % 1000;
+            var seconds = DateTimeUtils.UtcToUnixTimeStamp(utc);
+            var beat = (int)(((seconds - (seconds - ((seconds % 86400) + 3600))) * 10) / 864) % 1000;
             return (beat < 0) ? beat + 1000 : beat;
         }
 
@@ -513,6 +738,515 @@ namespace Pchp.Library
             else if (DayNumber10 == 3) { if (DayNumber/*%100*/ != 13) return "rd"; }
 
             return "th";
+        }
+
+        #endregion
+
+        #region date_interval_create_from_date_string, date_interval_format
+
+        /// <summary>
+        /// Alias of <see cref="DateInterval.createFromDateString(string)"/>.
+        /// </summary>
+        [return: CastToFalse]
+        public static DateInterval date_interval_create_from_date_string(string time) => DateInterval.createFromDateString(time);
+
+        /// <summary>
+        /// Alias to <see cref="DateInterval.format"/>.
+        /// </summary>
+        public static string date_interval_format(DateInterval @object, string format) => @object.format(format);
+
+        #endregion
+
+        #region date_parse_from_format
+
+        /// <summary>
+        /// Get info about given date formatted according to the specified format.
+        /// </summary>
+        public static PhpArray date_parse_from_format(Context ctx, string format, string date)
+        {
+            var dateinfo = DateInfo.ParseFromFormat(format, date, out var errors);
+            return AsArray(ctx, dateinfo, errors);
+        }
+
+        #endregion
+
+        #region strftime, gmstrftime
+
+        /// <summary>
+        /// Returns a string formatted according to the given format string using the current local time.
+        /// </summary>
+        /// <param name="ctx">Runtime context.</param>
+        /// <param name="format">Format of the string.</param>
+        /// <returns>Formatted string representing date and time.</returns>
+        public static string strftime(Context ctx, string format)
+        {
+            return FormatTime(ctx, format, System_DateTime.UtcNow, PhpTimeZone.GetCurrentTimeZone(ctx));
+        }
+
+        /// <summary>
+        /// Returns a string formatted according to the given format string using the given timestamp.
+        /// </summary>
+        /// <param name="ctx">Runtime context.</param>
+        /// <param name="format">Format of the string.</param>
+        /// <param name="timestamp">Number of seconds since 1970 representing the time to format.</param>
+        /// <returns>Formatted string representing date and time.</returns>
+        public static string strftime(Context ctx, string format, long timestamp)
+        {
+            return FormatTime(ctx, format, DateTimeUtils.UnixTimeStampToUtc(timestamp), PhpTimeZone.GetCurrentTimeZone(ctx));
+        }
+
+        /// <summary>
+        /// Behaves the same as <c>strftime</c> except that the time returned is Greenwich Mean Time (GMT).
+        /// </summary>
+        /// <param name="ctx">Runtime context.</param>
+        /// <param name="format">Format of the string.</param>
+        /// <returns>Formatted string representing date and time.</returns>
+        public static string gmstrftime(Context ctx, string format)
+        {
+            return FormatTime(ctx, format, System.DateTime.UtcNow, DateTimeUtils.UtcTimeZone);
+        }
+
+        /// <summary>
+        /// Behaves the same as <c>strftime</c> except that the time returned is Greenwich Mean Time (GMT).
+        /// </summary>
+        /// <param name="ctx">Runtime context.</param>
+        /// <param name="format">Format of the string.</param>
+        /// <param name="timestamp">Number of seconds since 1970 representing the time to format.</param>
+        /// <returns>Formatted string representing date and time.</returns>
+        public static string gmstrftime(Context ctx, string format, long timestamp)
+        {
+            return FormatTime(ctx, format, DateTimeUtils.UnixTimeStampToUtc(timestamp), DateTimeUtils.UtcTimeZone);
+        }
+
+        /// <summary>
+        /// Implementation of <see cref="gmstrftime(Context, string, long)"/> function.
+        /// </summary>
+        private static string FormatTime(Context ctx, string format, System.DateTime utc, TimeZoneInfo/*!*/ zone)
+        {
+            // Possibly bug in framework? "h" and "hh" just after midnight shows 12, not 0
+            if (string.IsNullOrEmpty(format)) return string.Empty;
+
+            var local = TimeZoneInfo.ConvertTime(utc, zone);// zone.ToLocalTime(utc);
+            var info = Locale.GetCulture(ctx, Locale.Category.Time).DateTimeFormat;
+
+            var result = StringBuilderUtilities.Pool.Get();
+
+            bool specialChar = false;
+
+            foreach (char ch in format)
+            {
+                if (!specialChar)
+                {
+                    if (ch == '%')
+                        specialChar = true;
+                    else
+                        result.Append(ch);
+
+                    continue;
+                }
+
+                // we have special character
+                switch (ch)
+                {
+                    case 'a':
+                        // abbreviated weekday name according to the current locale
+                        result.Append(local.ToString("ddd", info));
+                        break;
+
+                    case 'A':
+                        // full weekday name according to the current locale
+                        result.Append(local.ToString("dddd", info));
+                        break;
+
+                    case 'b':
+                        // abbreviated month name according to the current locale
+                        result.Append(local.ToString("MMM", info));
+                        break;
+
+                    case 'B':
+                        // full month name according to the current locale
+                        result.Append(local.ToString("MMMM", info));
+                        break;
+
+                    case 'c':
+                        // preferred date and time representation for the current locale
+                        result.Append(local.ToString(info));
+                        break;
+
+                    case 'C':
+                        // century number (the year divided by 100 and truncated to an integer, range 00 to 99)
+                        result.Append(local.Year / 100);
+                        break;
+
+                    case 'd':
+                        // day of the month as a decimal number (range 01 to 31)
+                        result.Append(local.ToString("dd", info));
+                        break;
+
+                    case 'D':
+                        // same as %m/%d/%y
+                        result.Append(local.ToString("MM\\/dd\\/yy", info));
+                        break;
+
+                    case 'e':
+                        // day of the month as a decimal number, a single digit is preceded by a space (range ' 1' to '31')
+                        result.AppendFormat("{0,2}", local.Day);
+                        break;
+
+                    case 'g':
+                        {
+                            // like %G, but without the century.
+                            int week, year;
+                            GetIsoWeekAndYear(local, out week, out year);
+                            result.AppendFormat("{0:00}", year % 100);
+                            break;
+                        }
+
+                    case 'G': // The 4-digit year corresponding to the ISO week number.
+                        {
+                            int week, year;
+                            GetIsoWeekAndYear(local, out week, out year);
+                            result.AppendFormat("{0:0000}", year);
+                            break;
+                        }
+
+                    case 'h':
+                        // same as %b
+                        goto case 'b';
+
+                    case 'H':
+                        // hour as a decimal number using a 24-hour clock (range 00 to 23)
+                        result.Append(local.ToString("HH", info));
+                        break;
+
+                    case 'I':
+                        // hour as a decimal number using a 12-hour clock (range 01 to 12)
+                        result.Append(local.ToString("hh", info));
+                        break;
+
+                    case 'j':
+                        // day of the year as a decimal number (range 001 to 366)
+                        result.AppendFormat("{0:000}", local.DayOfYear);
+                        break;
+
+                    case 'm':
+                        // month as a decimal number (range 01 to 12)
+                        result.Append(local.ToString("MM", info));
+                        break;
+
+                    case 'M':
+                        // minute as a decimal number
+                        result.Append(local.ToString("mm", info));
+                        break;
+
+                    case 'n':
+                        // newline character
+                        result.Append('\n');
+                        break;
+
+                    case 'p':
+                        // either `am' or `pm' according to the given time value,
+                        // or the corresponding strings for the current locale
+                        result.Append(local.ToString("tt", info));
+                        break;
+
+                    case 'r':
+                        // time in a.m. and p.m. notation
+                        result.Append(local.ToString("hh:mm:ss tt", info));
+                        break;
+
+                    case 'R':
+                        // time in 24 hour notation
+                        result.Append(local.ToString("H:mm:ss", info));
+                        break;
+
+                    case 'S':
+                        // second as a decimal number
+                        result.Append(local.ToString("ss", info));
+                        break;
+
+                    case 't':
+                        // tab character
+                        result.Append('\t');
+                        break;
+
+                    case 'T':
+                        // current time, equal to %H:%M:%S
+                        result.Append(local.ToString("HH:mm:ss", info));
+                        break;
+
+                    case 'u':
+                        // weekday as a decimal number [1,7], with 1 representing Monday
+                        result.Append(((int)local.DayOfWeek + 5) % 7 + 1);
+                        break;
+
+                    case 'U':
+                        // week number of the current year as a decimal number, starting with the first
+                        // Sunday as the first day of the first week (formula taken from GlibC 2.3.5):
+                        result.AppendFormat("{0:00}", (local.DayOfYear - 1 - (int)local.DayOfWeek + 7) / 7);
+                        break;
+
+                    case 'V':
+                        {
+                            // The ISO 8601:1988 week number of the current year
+                            int week, year;
+                            GetIsoWeekAndYear(local, out week, out year);
+                            result.AppendFormat("{0:00}", week);
+                            break;
+                        }
+
+                    case 'w':
+                        // day of the week as a decimal, Sunday being 0
+                        result.Append((int)local.DayOfWeek);
+                        break;
+
+                    case 'W':
+                        // week number of the current year as a decimal number, starting with the first
+                        // Monday as the first day of the first week (formula taken from GlibC 2.3.5):
+                        result.AppendFormat("{0:00}", (local.DayOfYear - 1 - ((int)local.DayOfWeek - 1 + 7) % 7 + 7) / 7);
+                        break;
+
+                    case 'x':
+                        // preferred date representation for the current locale without the time
+                        result.Append(local.ToString("d", info));
+                        break;
+
+                    case 'X':
+                        // preferred time representation for the current locale without the date
+                        result.Append(local.ToString("T", info));
+                        break;
+
+                    case 'y':
+                        // year as a decimal number without a century (range 00 to 99)
+                        result.Append(local.ToString("yy", info));
+                        break;
+
+                    case 'Y':
+                        // year as a decimal number including the century
+                        result.Append(local.ToString("yyyy", info));
+                        break;
+
+                    case 'z':
+                    case 'Z':
+                        result.Append(zone.IsDaylightSavingTime(local) ? zone.DaylightName : zone.StandardName);
+                        break;
+
+                    case '%':
+                        result.Append('%');
+                        break;
+                }
+                specialChar = false;
+            }
+
+            if (specialChar)
+                result.Append('%');
+
+            return StringBuilderUtilities.GetStringAndReturn(result);
+        }
+
+        #endregion
+
+        #region NS: strptime
+
+        //		[ImplementsFunction("strptime")]
+        //		public static PhpArray StringToTime(string datetime,string format)
+        //		{
+        //
+        //		}
+
+        #endregion
+
+        #region gmmktime
+
+        public static long gmmktime()
+        {
+            var utc_now = System.DateTime.UtcNow;
+            return gmmktime(utc_now.Hour, utc_now.Minute, utc_now.Second, utc_now.Month, utc_now.Day, utc_now.Year);
+        }
+
+        public static long gmmktime(int hour)
+        {
+            var utc_now = System.DateTime.UtcNow;
+            return gmmktime(hour, utc_now.Minute, utc_now.Second, utc_now.Month, utc_now.Day, utc_now.Year);
+        }
+
+        public static long gmmktime(int hour, int minute)
+        {
+            var utc_now = System.DateTime.UtcNow;
+            return gmmktime(hour, minute, utc_now.Second, utc_now.Month, utc_now.Day, utc_now.Year);
+        }
+
+        public static long gmmktime(int hour, int minute, int second)
+        {
+            var utc_now = System.DateTime.UtcNow;
+            return gmmktime(hour, minute, second, utc_now.Month, utc_now.Day, utc_now.Year);
+        }
+
+        public static long gmmktime(int hour, int minute, int second, int month)
+        {
+            var utc_now = System.DateTime.UtcNow;
+            return gmmktime(hour, minute, second, month, utc_now.Day, utc_now.Year);
+        }
+
+        public static long gmmktime(int hour, int minute, int second, int month, int day)
+        {
+            var utc_now = System.DateTime.UtcNow;
+            return gmmktime(hour, minute, second, month, day, utc_now.Year);
+        }
+
+        public static long gmmktime(int hour, int minute, int second, int month, int day, int year, int dummy)
+        {
+            // According to PHP manual daylight savings time parameter ignored
+            return gmmktime(hour, minute, second, month, day, year);
+        }
+
+        public static long gmmktime(int hour, int minute, int second, int month, int day, int year)
+        {
+            return DateTimeUtils.UtcToUnixTimeStamp(MakeDateTime(hour, minute, second, month, day, year));
+        }
+
+        #endregion
+
+        #region mktime
+
+        /// <summary>
+        /// Returns the Unix timestamp for current time.
+        /// </summary>
+        /// <param name="ctx">Runtime context.</param>
+        /// <returns>Unix timestamp.</returns>
+        public static long mktime(Context ctx)
+        {
+            var now = GetNow(ctx);
+            return mktime(ctx, now.Hour, now.Minute, now.Second, now.Month, now.Day, now.Year, -1);
+        }
+
+        /// <summary>
+        /// Returns the Unix timestamp for a time compound of an hour which is specified and a minute, a second,
+        /// a month, a day and a year which are taken from the current date values.
+        /// </summary>
+        /// <param name="ctx">Runtime context.</param>
+        /// <param name="hour">The hour.</param>
+        /// <returns>Unix timestamp.</returns>
+        public static long mktime(Context ctx, int hour)
+        {
+            var now = GetNow(ctx);
+            return mktime(ctx, hour, now.Minute, now.Second, now.Month, now.Day, now.Year, -1);
+        }
+
+        /// <summary>
+        /// Returns the Unix timestamp for a time compound of an hour and a minute which are specified and a second,
+        /// a month, a day and a year which are taken from the current date values.
+        /// </summary>
+        /// <param name="ctx">Runtime context.</param>
+        /// <param name="hour">The hour.</param>
+        /// <param name="minute">The minute.</param>
+        /// <returns>Unix timestamp.</returns>
+        public static long mktime(Context ctx, int hour, int minute)
+        {
+            var now = GetNow(ctx);
+            return mktime(ctx, hour, minute, now.Second, now.Month, now.Day, now.Year, -1);
+        }
+
+        /// <summary>
+        /// Returns the Unix timestamp for a time compound of an hour, a minute and a second which are specified and
+        /// a month, a day and a year which are taken from the current date values.
+        /// </summary>
+        /// <param name="ctx">Runtime context.</param>
+        /// <param name="hour">The hour.</param>
+        /// <param name="minute">The minute.</param>
+        /// <param name="second">The second.</param>
+        /// <returns>Unix timestamp.</returns>
+        public static long mktime(Context ctx, int hour, int minute, int second)
+        {
+            var now = GetNow(ctx);
+            return mktime(ctx, hour, minute, second, now.Month, now.Day, now.Year, -1);
+        }
+
+        /// <summary>
+        /// Returns the Unix timestamp for a time compound of an hour, a minute, a second and a month which are specified and
+        /// a day and a year which are taken from the current date values.
+        /// </summary>
+        /// <param name="ctx">Runtime context.</param>
+        /// <param name="hour">The hour.</param>
+        /// <param name="minute">The minute.</param>
+        /// <param name="second">The second.</param>
+        /// <param name="month">The month.</param>
+        /// <returns>Unix timestamp.</returns>
+        public static long mktime(Context ctx, int hour, int minute, int second, int month)
+        {
+            var now = GetNow(ctx);
+            return mktime(ctx, hour, minute, second, month, now.Day, now.Year, -1);
+        }
+
+        /// <summary>
+        /// Returns the Unix timestamp for a time compound of an hour, a minute, a second, a month and a day
+        /// which are specified and a year which is taken from the current date values.
+        /// </summary>
+        /// <param name="ctx">Runtime context.</param>
+        /// <param name="hour">The hour.</param>
+        /// <param name="minute">The minute.</param>
+        /// <param name="second">The second.</param>
+        /// <param name="month">The month.</param>
+        /// <param name="day">The day.</param>
+        /// <returns>Unix timestamp.</returns>
+        public static long mktime(Context ctx, int hour, int minute, int second, int month, int day)
+        {
+            var now = GetNow(ctx);
+            return mktime(ctx, hour, minute, second, month, day, now.Year, -1);
+        }
+
+        /// <summary>
+        /// Returns the Unix timestamp for a time compound of an hour, a minute, a second, a month, a day and a year.
+        /// </summary>
+        /// <param name="ctx">Runtime context.</param>
+        /// <param name="hour">The hour.</param>
+        /// <param name="minute">The minute.</param>
+        /// <param name="second">The second.</param>
+        /// <param name="month">The month.</param>
+        /// <param name="day">The day.</param>
+        /// <param name="year">The year.</param>
+        /// <returns>Unix timestamp.</returns>
+        public static long mktime(Context ctx, int hour, int minute, int second, int month, int day, int year)
+        {
+            return mktime(ctx, hour, minute, second, month, day, year, -1);
+        }
+
+        /// <summary>
+        /// Returns the Unix timestamp for a time compound of an hour, a minute, a second, a month, a day and a year.
+        /// </summary>
+        /// <param name="ctx">Runtime context.</param>
+        /// <param name="hour">The hour.</param>
+        /// <param name="minute">The minute.</param>
+        /// <param name="second">The second.</param>
+        /// <param name="month">The month.</param>
+        /// <param name="day">The day.</param>
+        /// <param name="year">The year.</param>
+        /// <param name="daylightSaving">Daylight savings time.</param>
+        /// <returns>Unix timestamp.</returns>
+        public static long mktime(Context ctx, int hour, int minute, int second, int month, int day, int year, int daylightSaving)
+        {
+            var zone = PhpTimeZone.GetCurrentTimeZone(ctx);
+            var local = MakeDateTime(hour, minute, second, month, day, year);
+
+            switch (daylightSaving)
+            {
+                case -1: // detect, whether the date is during DST:
+                    if (zone.IsDaylightSavingTime(local))
+                        local.AddHours(-1);
+                    break;
+
+                case 0: // not dst
+                    break;
+
+                case 1: // dst
+                    local.AddHours(-1);
+                    break;
+
+                default:
+                    PhpException.ArgumentValueNotSupported("daylightSaving", daylightSaving);
+                    break;
+            }
+            return DateTimeUtils.UtcToUnixTimeStamp(TimeZoneInfo.ConvertTime(local, zone, TimeZoneInfo.Utc));
         }
 
         #endregion
@@ -606,7 +1340,7 @@ namespace Pchp.Library
         {
             return month >= 1 && month <= 12
                 && year >= 1 && year <= 32767
-                && day >= 1 && day <= System_DateTime.DaysInMonth(year, month); // this works also with leap years
+                && day >= 1 && day <= DateInfo.DaysInMonthFixed(year, month); // this works also with leap years
         }
 
         #endregion
@@ -628,7 +1362,7 @@ namespace Pchp.Library
         /// <param name="ctx">Current runtime context.</param>
         /// <param name="timestamp">Number of seconds since 1970.</param>
         /// <returns>Associative array with date information.</returns>
-        public static PhpArray getdate(Context ctx, int timestamp)
+        public static PhpArray getdate(Context ctx, long timestamp)
         {
             return GetDate(ctx, DateTimeUtils.UnixTimeStampToUtc(timestamp));
         }
@@ -641,7 +1375,7 @@ namespace Pchp.Library
         /// <returns>Associative array with date information.</returns>
         static PhpArray GetDate(Context ctx, System_DateTime utc)
         {
-            PhpArray result = new PhpArray(1, 10);
+            PhpArray result = new PhpArray(11);
 
             var zone = PhpTimeZone.GetCurrentTimeZone(ctx);
             var local = TimeZoneInfo.ConvertTime(utc, zone);
@@ -663,71 +1397,6 @@ namespace Pchp.Library
 
         #endregion
 
-        #region gettimeofday
-
-        /// <summary>
-        /// Gets time information.
-        /// </summary>
-        /// <remarks>
-        /// It returns <see cref="PhpArray"/> containing the following 4 entries:
-        /// <list type="table">
-        /// <item><term><c>"sec"</c></term><description>Unix timestamp (seconds since the Unix Epoch)</description></item>
-        /// <item><term><c>"usec"</c></term><description>microseconds</description></item>
-        /// <item><term><c>"minuteswest"</c></term><description>minutes west of Greenwich (doesn't take daylight savings time in consideration)</description></item>
-        /// <item><term><c>"dsttime"</c></term><description>type of DST correction (+1 or 0, determined only by the current time zone not by the time)</description></item>
-        /// </list>
-        /// </remarks>
-        /// <returns>Associative array</returns>
-        public static PhpArray gettimeofday(Context ctx)
-        {
-            return GetTimeOfDay(System_DateTime.UtcNow, PhpTimeZone.GetCurrentTimeZone(ctx));
-        }
-
-        public static object gettimeofday(Context ctx, bool returnDouble)
-        {
-            if (returnDouble)
-            {
-                return (GetNow(ctx) - DateTimeUtils.UtcStartOfUnixEpoch).TotalSeconds;
-            }
-            else
-            {
-                return gettimeofday(ctx);
-            }
-        }
-
-        internal static PhpArray GetTimeOfDay(System_DateTime utc, TimeZoneInfo/*!*/ zone)
-        {
-            var result = new PhpArray(0, 4);
-
-            var local = TimeZoneInfo.ConvertTime(utc, zone);
-
-            //int current_dst = 0;
-            if (zone.IsDaylightSavingTime(local))
-            {
-                // TODO: current_dst
-                //var rules = zone.GetAdjustmentRules();
-                //for (int i = 0; i < rules.Length; i++)
-                //{
-                //    if (rules[i].DateStart <= local && rules[i].DateEnd >= local)
-                //    {
-                //        current_dst = (int)rules[i].DaylightDelta.TotalHours;
-                //        break;
-                //    }
-                //}
-            }
-
-            const int ticks_per_microsecond = (int)TimeSpan.TicksPerMillisecond / 1000;
-
-            result["sec"] = PhpValue.Create(DateTimeUtils.UtcToUnixTimeStamp(utc));
-            result["usec"] = PhpValue.Create((int)(local.Ticks % TimeSpan.TicksPerSecond) / ticks_per_microsecond);
-            result["minuteswest"] = PhpValue.Create((int)(utc - local).TotalMinutes);
-            //result["dsttime"] = PhpValue.Create(current_dst);
-
-            return result;
-        }
-
-        #endregion
-
         #region localtime
 
         /// <summary>
@@ -738,18 +1407,6 @@ namespace Pchp.Library
         public static PhpArray localtime(Context ctx)
         {
             return GetLocalTime(PhpTimeZone.GetCurrentTimeZone(ctx), System_DateTime.UtcNow, false);
-        }
-
-        /// <summary>
-        /// The localtime() function returns an array identical to that of the structure returned by the C function call.
-        /// Time specified by the parameter timestamp is used, regular numericaly indexed array is returned.
-        /// </summary>
-        /// <param name="ctx">Current runtime context.</param>
-        /// <param name="timestamp">Number of seconds since 1970.</param>
-        /// <returns>Array containing values specifying the date and time.</returns>
-        public static PhpArray localtime(Context ctx, int timestamp)
-        {
-            return GetLocalTime(PhpTimeZone.GetCurrentTimeZone(ctx), DateTimeUtils.UnixTimeStampToUtc(timestamp), false);
         }
 
         /// <summary>
@@ -777,20 +1434,18 @@ namespace Pchp.Library
         /// <param name="timestamp"></param>
         /// <param name="returnAssociative"></param>
         /// <returns></returns>
-        public static PhpArray localtime(Context ctx, int timestamp, bool returnAssociative)
+        public static PhpArray localtime(Context ctx, long timestamp, bool returnAssociative = false)
         {
             return GetLocalTime(PhpTimeZone.GetCurrentTimeZone(ctx), DateTimeUtils.UnixTimeStampToUtc(timestamp), returnAssociative);
         }
 
         internal static PhpArray GetLocalTime(TimeZoneInfo currentTz, System_DateTime utc, bool returnAssociative)
         {
-            PhpArray result;
-
             var local = TimeZoneInfo.ConvertTime(utc, currentTz);
+            var result = new PhpArray(9);
 
             if (returnAssociative)
             {
-                result = new PhpArray(0, 9);
                 result["tm_sec"] = PhpValue.Create(local.Second);
                 result["tm_min"] = PhpValue.Create(local.Minute);
                 result["tm_hour"] = PhpValue.Create(local.Hour);
@@ -803,7 +1458,6 @@ namespace Pchp.Library
             }
             else
             {
-                result = new PhpArray(9, 0);
                 result.AddValue(PhpValue.Create(local.Second));
                 result.AddValue(PhpValue.Create(local.Minute));
                 result.AddValue(PhpValue.Create(local.Hour));
@@ -820,88 +1474,155 @@ namespace Pchp.Library
 
         #endregion
 
-        #region microtime
-
-        /// <summary>
-        /// Returns the string "msec sec" where sec is the current time measured in the number of seconds
-        /// since the Unix Epoch (0:00:00 January 1, 1970 GMT), and msec is the microseconds part.
-        /// </summary>
-        /// <returns>String containing number of miliseconds, space and number of seconds.</returns>
-        public static string microtime()
-        {
-            // time from 1970
-            TimeSpan fromUnixEpoch = System_DateTime.UtcNow - DateTimeUtils.UtcStartOfUnixEpoch;
-
-            // seconds part to return
-            long seconds = (long)fromUnixEpoch.TotalSeconds;
-
-            // only remaining time less than one second
-            TimeSpan mSec = fromUnixEpoch.Subtract(new TimeSpan(seconds * 10000000)); // convert seconds to 100 ns
-            double remaining = ((double)mSec.Ticks) / 10000000; // convert from 100ns to seconds
-
-            return remaining.ToString("G", System.Globalization.NumberFormatInfo.InvariantInfo) + " " + seconds.ToString();
-        }
-
-        /// <summary>
-        /// Returns the fractional time in seconds from the start of the UNIX epoch.
-        /// </summary>
-        /// <param name="returnDouble"><c>true</c> to return the double, <c>false</c> to return string.</param>
-        /// <returns><see cref="String"/> containing number of miliseconds, space and number of seconds
-        /// if <paramref name="returnDouble"/> is <c>false</c> and <see cref="double"/>
-        /// containing the fractional count of seconds otherwise.</returns>
-        public static PhpValue microtime(bool returnDouble)
-        {
-            if (returnDouble)
-                return PhpValue.Create((System_DateTime.UtcNow - DateTimeUtils.UtcStartOfUnixEpoch).TotalSeconds);
-            else
-                return PhpValue.Create(microtime());
-        }
-
-        #endregion
-
-        #region strtotime
+        #region strtotime, date_parse
 
         /// <summary>
         /// Parses a string containing an English date format into a UNIX timestamp relative to the current time.
         /// </summary>
-        /// <param name="time">String containing time definition</param>
+        /// <param name="datetime">String containing time definition</param>
         /// <returns>Number of seconds since 1/1/1970 or -1 on failure.</returns>
-        public static int strtotime(string time)
+        [return: CastToFalse]
+        public static long strtotime(string datetime)
         {
-            return StringToTime(time, System_DateTime.UtcNow);
+            return StringToTime(datetime, System_DateTime.UtcNow);
         }
 
         /// <summary>
         /// Parses a string containing an English date format into a UNIX timestamp relative to a specified time.
         /// </summary>
-        /// <param name="time">String containing time definition.</param>
-        /// <param name="start">Timestamp (seconds from 1970) to which is the new timestamp counted.</param>
+        /// <param name="datetime">String containing time definition.</param>
+        /// <param name="baseTimestamp">Timestamp (seconds from 1970) to which is the new timestamp counted.</param>
         /// <returns>Number of seconds since 1/1/1970 or -1 on failure.</returns>
-        public static int strtotime(string time, int start)
+        [return: CastToFalse]
+        public static long strtotime(string datetime, long baseTimestamp)
         {
-            return StringToTime(time, DateTimeUtils.UnixTimeStampToUtc(start));
+            return StringToTime(datetime, DateTimeUtils.UnixTimeStampToUtc(baseTimestamp));
         }
 
         /// <summary>
         /// Implementation of <see cref="StringToTime(string,int)"/> function.
+        /// Returns unix timestamp or <c>-1</c> (FALSE) if time cannot be parsed.
         /// </summary>
-        static int StringToTime(string time, System_DateTime startUtc)
+        static long StringToTime(string time, System_DateTime refdate)
         {
-            //if (time == null) return false;
-            //time = time.Trim();
-            //if (time.Length == 0) return false;
+            if (string.IsNullOrWhiteSpace(time))
+            {
+                // no warning
+                return -1;  // FALSE
+            }
 
-            //string error = null;
-            //int result = StrToTime.DateInfo.Parse(time, startUtc, out error);
-            //if (error != null)
-            //{
-            //    PhpException.Throw(PhpError.Warning, error);
-            //    return false;
-            //}
+            var utctz = TimeZoneInfo.Utc;
+            var result = DateInfo.Parse(time.Trim(), refdate, ref utctz, out var error);
 
-            //return result;
+            if (error == null)
+            {
+                return DateTimeUtils.UtcToUnixTimeStamp(result);
+            }
+            else
+            {
+                PhpException.Throw(PhpError.Warning, error);
+                return -1;  // FALSE
+            }
+        }
 
-            throw new NotImplementedException();
+        /// <summary>
+        /// Returns associative array with detailed info about given date.
+        /// </summary>
+        /// <returns>Returns array with information about the parsed date on success.</returns>
+        public static PhpArray date_parse(Context ctx, string time)
+        {
+            DateTimeErrors errors = null;
+
+            if (string.IsNullOrEmpty(time))
+            {
+                time = string.Empty;
+                DateTimeErrors.AddError(ref errors, Resources.DateResources.empty_string);
+            }
+
+            //
+            var scanner = new Scanner(new StringReader(time.ToLowerInvariant()));
+            while (true)
+            {
+                var token = scanner.GetNextToken();
+                if (token == Tokens.ERROR || scanner.Errors > 0)
+                {
+                    DateTimeErrors.AddError(ref errors, string.Format(Resources.LibResources.parse_error, scanner.Position.ToString(), time.Substring(scanner.Position)));
+                    break;
+                }
+
+                if (token == Tokens.EOF)
+                {
+                    break;
+                }
+            }
+
+            //
+            return AsArray(ctx, scanner.Time, errors);
+        }
+
+        static PhpArray AsArray(Context ctx, DateInfo dateinfo, DateTimeErrors errors)
+        {
+            var localtz = PhpTimeZone.GetCurrentTimeZone(ctx);
+            var localtime = dateinfo.GetDateTime(System_DateTime.UtcNow, ref localtz);
+
+            var result = new PhpArray(16);
+            //[year] => 2006
+            result["year"] = dateinfo.y >= 0 ? (PhpValue)localtime.Year : PhpValue.False;
+            //[month] => 12
+            result["month"] = dateinfo.m >= 0 ? (PhpValue)localtime.Month : PhpValue.False;
+            //[day] => 12
+            result["day"] = dateinfo.d >= 0 ? (PhpValue)localtime.Day : PhpValue.False;
+            //[hour] => 10
+            result["hour"] = dateinfo.h >= 0 ? (PhpValue)localtime.Hour : PhpValue.False;
+            //[minute] => 0
+            result["minute"] = dateinfo.i >= 0 ? (PhpValue)localtime.Minute : PhpValue.False;
+            //[second] => 0
+            result["second"] = dateinfo.s >= 0 ? (PhpValue)localtime.Second : PhpValue.False;
+            //[fraction] => 0.5
+            result["fraction"] = dateinfo.have_time != 0 ? (PhpValue)dateinfo.f : 0;
+            //[warning_count] => 0
+            result["warning_count"] = errors != null && errors.Warnings != null ? errors.Warnings.Count : 0;
+            //[warnings] => Array()
+            result["warnings"] = errors != null && errors.Warnings != null ? new PhpArray(errors.Warnings) : PhpArray.NewEmpty();
+            //[error_count] => 0
+            result["error_count"] = errors != null && errors.Errors != null ? errors.Errors.Count : 0;
+            //[errors] => Array()
+            result["errors"] = errors != null && errors.Errors != null ? new PhpArray(errors.Errors) : PhpArray.NewEmpty();
+            //[is_localtime] => 
+            result["is_localtime"] = dateinfo.have_zone != 0; // ???
+
+            if (dateinfo.have_zone != 0)
+            {
+                // [zone_type] => 1
+                result["zone_type"] = DateInfo.GetTimeLibZoneType(localtz);
+                // [zone] => 37800
+                result["zone"] = dateinfo.z * 60; // seconds!
+                // [is_dst] => 
+                result["is_dst"] = localtz.IsDaylightSavingTime(localtime);
+            }
+
+            if (dateinfo.have_relative != 0)
+            {
+                result["relative"] = new PhpArray(6)
+                {
+                    //[year] => 0
+                    { "year", dateinfo.relative.y },
+                    //[month] => 0
+                    { "month", dateinfo.relative.m },
+                    //[day] => 7
+                    { "day", dateinfo.relative.d },
+                    //[hour] => 1
+                    { "hour", dateinfo.relative.h },
+                    //[minute] => 0
+                    { "minute", dateinfo.relative.i },
+                    //[second] => 0
+                    { "second", dateinfo.relative.s },
+                    //[weekday] => 1
+                    { "weekday", dateinfo.have_weekday_relative != 0 ? dateinfo.relative.weekday : 0 },
+                };
+            }
+
+            return result;
         }
 
         #endregion
@@ -912,7 +1633,7 @@ namespace Pchp.Library
         /// Returns the current time measured in the number of seconds since the Unix Epoch (January 1 1970 00:00:00 GMT).
         /// </summary>
         /// <returns>Number of seconds since 1970.</returns>
-        public static int time()
+        public static long time()
         {
             return DateTimeUtils.UtcToUnixTimeStamp(System_DateTime.UtcNow);
         }
@@ -925,6 +1646,7 @@ namespace Pchp.Library
         public const int SUNFUNCS_RET_STRING = (int)TimeFormats.String;
         public const int SUNFUNCS_RET_DOUBLE = (int)TimeFormats.Double;
 
+        [PhpHidden]
         public enum TimeFormats
         {
             Integer = 0,
@@ -932,67 +1654,17 @@ namespace Pchp.Library
             Double = 2
         }
 
-        public static PhpValue date_sunrise(Context ctx, int timestamp)
-        {
-            return GetSunTime(ctx, timestamp, TimeFormats.String, Double.NaN, Double.NaN, Double.NaN, Double.NaN, true);
-        }
-
-        public static PhpValue date_sunrise(Context ctx, int timestamp, TimeFormats format)
-        {
-            return GetSunTime(ctx, timestamp, format, Double.NaN, Double.NaN, Double.NaN, Double.NaN, true);
-        }
-
-        public static PhpValue date_sunrise(Context ctx, int timestamp, TimeFormats format, double latitude)
-        {
-            return GetSunTime(ctx, timestamp, format, latitude, Double.NaN, Double.NaN, Double.NaN, true);
-        }
-
-        public static PhpValue date_sunrise(Context ctx, int timestamp, TimeFormats format, double latitude, double longitude)
-        {
-            return GetSunTime(ctx, timestamp, format, latitude, longitude, Double.NaN, Double.NaN, true);
-        }
-
-        public static PhpValue date_sunrise(Context ctx, int timestamp, TimeFormats format, double latitude, double longitude, double zenith)
-        {
-            return GetSunTime(ctx, timestamp, format, latitude, longitude, zenith, Double.NaN, true);
-        }
-
-        public static PhpValue date_sunrise(Context ctx, int timestamp, TimeFormats format, double latitude, double longitude, double zenith, double offset)
+        public static PhpValue date_sunrise(Context ctx, long timestamp, TimeFormats format = TimeFormats.String, double latitude = double.NaN, double longitude = double.NaN, double zenith = double.NaN, double offset = double.NaN)
         {
             return GetSunTime(ctx, timestamp, format, latitude, longitude, zenith, offset, true);
         }
 
-        public static PhpValue date_sunset(Context ctx, int timestamp)
-        {
-            return GetSunTime(ctx, timestamp, TimeFormats.String, Double.NaN, Double.NaN, Double.NaN, Double.NaN, false);
-        }
-
-        public static PhpValue date_sunset(Context ctx, int timestamp, TimeFormats format)
-        {
-            return GetSunTime(ctx, timestamp, format, Double.NaN, Double.NaN, Double.NaN, Double.NaN, false);
-        }
-
-        public static PhpValue date_sunset(Context ctx, int timestamp, TimeFormats format, double latitude)
-        {
-            return GetSunTime(ctx, timestamp, format, latitude, Double.NaN, Double.NaN, Double.NaN, false);
-        }
-
-        public static PhpValue date_sunset(Context ctx, int timestamp, TimeFormats format, double latitude, double longitude)
-        {
-            return GetSunTime(ctx, timestamp, format, latitude, longitude, Double.NaN, Double.NaN, false);
-        }
-
-        public static PhpValue date_sunset(Context ctx, int timestamp, TimeFormats format, double latitude, double longitude, double zenith)
-        {
-            return GetSunTime(ctx, timestamp, format, latitude, longitude, zenith, Double.NaN, false);
-        }
-
-        public static PhpValue date_sunset(Context ctx, int timestamp, TimeFormats format, double latitude, double longitude, double zenith, double offset)
+        public static PhpValue date_sunset(Context ctx, long timestamp, TimeFormats format = TimeFormats.String, double latitude = double.NaN, double longitude = double.NaN, double zenith = double.NaN, double offset = double.NaN)
         {
             return GetSunTime(ctx, timestamp, format, latitude, longitude, zenith, offset, false);
         }
 
-        static PhpValue GetSunTime(Context ctx, int timestamp, TimeFormats format, double latitude, double longitude, double zenith, double offset, bool getSunrise)
+        static PhpValue GetSunTime(Context ctx, long timestamp, TimeFormats format, double latitude, double longitude, double zenith, double offset, bool getSunrise)
         {
             var zone = PhpTimeZone.GetCurrentTimeZone(ctx);
             var utc = DateTimeUtils.UnixTimeStampToUtc(timestamp);

@@ -5,10 +5,12 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.PooledObjects;
 using System.Collections.Concurrent;
 using System.Reflection.Metadata;
 using System.Diagnostics;
 using Cci = Microsoft.Cci;
+using System.Threading;
 
 namespace Pchp.CodeAnalysis.Symbols
 {
@@ -26,10 +28,16 @@ namespace Pchp.CodeAnalysis.Symbols
         /// </summary>
         readonly PEModule _module;
 
-        ///// <summary>
-        ///// Global namespace.
-        ///// </summary>
+        /// <summary>
+        /// Global namespace.
+        /// </summary>
         readonly PENamespaceSymbol _namespace;
+
+        /// <summary>
+        /// Cache the symbol for well-known type System.Type because we use it frequently
+        /// (for attributes).
+        /// </summary>
+        private NamedTypeSymbol _lazySystemTypeSymbol;
 
         /// <summary>
         /// Module's custom attributes
@@ -98,6 +106,22 @@ namespace Pchp.CodeAnalysis.Symbols
             get
             {
                 throw new NotImplementedException();
+            }
+        }
+
+        internal DocumentationProvider DocumentationProvider
+        {
+            get
+            {
+                var assembly = _assembly as PEAssemblySymbol;
+                if ((object)assembly != null)
+                {
+                    return assembly.DocumentationProvider;
+                }
+                else
+                {
+                    return DocumentationProvider.Default;
+                }
             }
         }
 
@@ -341,6 +365,21 @@ namespace Pchp.CodeAnalysis.Symbols
             return result;
         }
 
+        internal NamedTypeSymbol SystemTypeSymbol
+        {
+            get
+            {
+                if ((object)_lazySystemTypeSymbol == null)
+                {
+                    Interlocked.CompareExchange(ref _lazySystemTypeSymbol,
+                                                GetTypeSymbolForWellKnownType(WellKnownType.System_Type),
+                                                null);
+                    Debug.Assert((object)_lazySystemTypeSymbol != null);
+                }
+                return _lazySystemTypeSymbol;
+            }
+        }
+
         private NamedTypeSymbol GetTypeSymbolForWellKnownType(WellKnownType type)
         {
             MetadataTypeName emittedName = MetadataTypeName.FromFullName(type.GetMetadataName(), useCLSCompliantNameArityEncoding: true);
@@ -409,8 +448,22 @@ namespace Pchp.CodeAnalysis.Symbols
             try
             {
                 string matchedName;
-                AssemblyReferenceHandle assemblyRef = Module.GetAssemblyForForwardedType(fullName.FullName, ignoreCase: false, matchedName: out matchedName);
-                return assemblyRef.IsNil ? null : this.ReferencedAssemblySymbols[Module.GetAssemblyReferenceIndexOrThrow(assemblyRef)];
+                (int firstIndex, int secondIndex) = Module.GetAssemblyRefsForForwardedType(fullName.FullName, ignoreCase: false, matchedName: out matchedName);
+                
+                if (firstIndex < 0)
+                {
+                    return null;
+                }
+
+                var firstSymbol = this.ReferencedAssemblySymbols[firstIndex];
+
+                if (secondIndex >= 0)
+                {
+                    // TODO: If necessary, return both symbols and report an error in PEAssemblySymbol as C# does
+                    throw new NotImplementedException();
+                }
+
+                return firstSymbol;
             }
             catch (BadImageFormatException)
             {

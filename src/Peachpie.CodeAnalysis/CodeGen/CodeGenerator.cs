@@ -14,24 +14,12 @@ using System.Reflection.Metadata;
 using System.Diagnostics;
 using System.Collections.Immutable;
 using Cci = Microsoft.Cci;
+using Pchp.CodeAnalysis.Semantics;
 
 namespace Pchp.CodeAnalysis.CodeGen
 {
-    internal partial class CodeGenerator
+    internal partial class CodeGenerator : IDisposable
     {
-        #region BoundBlockOrdinalComparer
-
-        sealed class BoundBlockOrdinalComparer : IComparer<BoundBlock>, IEqualityComparer<BoundBlock>
-        {
-            int IEqualityComparer<BoundBlock>.GetHashCode(BoundBlock obj) => obj.GetHashCode();
-
-            bool IEqualityComparer<BoundBlock>.Equals(BoundBlock x, BoundBlock y) => object.ReferenceEquals(x, y);
-            
-            int IComparer<BoundBlock>.Compare(BoundBlock x, BoundBlock y) => y.Ordinal - x.Ordinal;
-        }
-
-        #endregion
-
         #region LocalScope
 
         internal class LocalScope
@@ -43,7 +31,7 @@ namespace Pchp.CodeAnalysis.CodeGen
             readonly ScopeType _type;
             readonly int _from, _to;
 
-            HashSet<BoundBlock> _blocks;
+            SortedSet<BoundBlock> _blocks;
 
             #endregion
 
@@ -82,7 +70,9 @@ namespace Pchp.CodeAnalysis.CodeGen
                 if (IsIn(block))
                 {
                     if (_blocks == null)
-                        _blocks = new HashSet<BoundBlock>();
+                    {
+                        _blocks = new SortedSet<BoundBlock>(BoundBlock.EmitOrderComparer.Instance);
+                    }
 
                     _blocks.Add(block);
                 }
@@ -105,8 +95,9 @@ namespace Pchp.CodeAnalysis.CodeGen
                     return;
                 }
 
-                if (block.IsDead)
+                if (block.IsDead || block.FlowState == null)
                 {
+                    // ignore dead/unreachable blocks
                     return;
                 }
 
@@ -115,22 +106,27 @@ namespace Pchp.CodeAnalysis.CodeGen
                     throw new InvalidOperationException("block miss");
                 }
 
-                if (block.Ordinal < _to)    // is in
+                if (IsIn(block))
                 {
                     // TODO: avoid branching to a guarded scope // e.g. goto x; try { x: }
 
-                    if (_blocks != null)
-                        _blocks.Remove(block);
+                    if (_blocks == null || _blocks.Count == 0 || _blocks.Comparer.Compare(block, _blocks.First()) < 0)
+                    {
+                        if (_blocks != null)
+                        {
+                            _blocks.Remove(block);
+                        }
 
-                    // continue with the block
-                    _codegen.GenerateBlock(block);
+                        // continue with the block
+                        _codegen.GenerateBlock(block);
+                        return;
+                    }
                 }
-                else
-                {
-                    // forward edge:
-                    IL.EmitBranch(ILOpCode.Br, block);  // TODO: avoid branch instruction if block will follow immediately
-                    Parent.Enqueue(block);
-                }
+
+                // forward edge:
+                // note: if block will follow immediately, .br will be ignored
+                IL.EmitBranch(ILOpCode.Br, block);
+                this.Enqueue(block);
             }
 
             internal BoundBlock Dequeue()
@@ -139,8 +135,6 @@ namespace Pchp.CodeAnalysis.CodeGen
 
                 if (_blocks != null && _blocks.Count != 0)
                 {
-                    // TODO: "priority" queue to avoid branching
-
                     block = _blocks.First();
                     _blocks.Remove(block);
                 }
@@ -172,7 +166,7 @@ namespace Pchp.CodeAnalysis.CodeGen
         readonly ILBuilder _il;
         readonly SourceRoutineSymbol _routine;
         readonly PEModuleBuilder _moduleBuilder;
-        readonly OptimizationLevel _optimizations;
+        readonly PhpOptimizationLevel _optimizations;
         readonly bool _emitPdbSequencePoints;
         readonly DiagnosticBag _diagnostics;
         readonly DynamicOperationFactory _factory;
@@ -184,15 +178,76 @@ namespace Pchp.CodeAnalysis.CodeGen
 
         /// <summary>
         /// Place referring array of locals variables.
-        /// This is valid for global scope or local scope with unoptimized locals.
+        /// This is valid for global scope, local scope with unoptimized locals and generators.
         /// </summary>
         readonly IPlace _localsPlaceOpt;
+
+        /// <summary>
+        /// Place referring array to temporal local variables.
+        /// </summary>
+        /// <remarks>
+        /// Must not be null if method contains any synthesized temporal local variables as they need to be indirect.
+        /// </remarks>
+        readonly IPlace _tmpLocalsPlace;
+
+        /// <summary>
+        /// Are locals initilized externally.
+        /// </summary>
+        readonly bool _localsInitialized;
 
         /// <summary>
         /// Place for loading a reference to <c>this</c>.
         /// </summary>
         public IPlace ThisPlaceOpt => _thisPlace;
         readonly IPlace _thisPlace;
+
+        /// <summary>
+        /// In case code generator emits body of a generator SM method,
+        /// gets reference to synthesized method symbol with additional information.
+        /// </summary>
+        internal SourceGeneratorSymbol GeneratorStateMachineMethod { get => _smmethod; set => _smmethod = value; }
+        SourceGeneratorSymbol _smmethod;
+
+        /// <summary>
+        /// Local variable containing the current state of state machine.
+        /// </summary>
+        internal LocalDefinition GeneratorStateLocal { get; set; }
+
+        /// <summary>
+        /// "finally" block to be branched in when returning from the routine.
+        /// This finally block is not handled by CLR as it is emitted outside the TryCatchFinally scope.
+        /// </summary>
+        internal BoundBlock ExtraFinallyBlock { get; set; }
+
+        internal enum ExtraFinallyState : int
+        {
+            /// <summary>continue to NextBlock</summary>
+            None = 0,
+            /// <summary>continue to next ExtraFinallyBlock, eventually EmitRet</summary>
+            Return = 1,
+            /// <summary>rethrow exception (<see cref="ExceptionToRethrowVariable"/>)</summary>
+            Exception = 2,
+        }
+
+        /// <summary>
+        /// Temporary variable holding state of "finally" block handling. Value of <see cref="ExtraFinallyState"/>.
+        /// Variable created once only if <see cref="ExtraFinallyBlock"/> is set.
+        /// Type: <c>System.Int32</c>
+        /// </summary>
+        internal TemporaryLocalDefinition ExtraFinallyStateVariable { get; set; }
+
+        /// <summary>
+        /// Temporary variable holding exception to be rethrown after "finally" block ends.
+        /// Type: <c>System.Exception</c>
+        /// </summary>
+        internal TemporaryLocalDefinition ExceptionToRethrowVariable { get; set; }
+
+        /// <summary>
+        /// Local variable with array of all routine's arguments.
+        /// PhpValue[]
+        /// Initialized once when <see cref="SourceRoutineSymbol.Flags"/> has <see cref="RoutineFlags.UsesArgs"/>.
+        /// </summary>
+        internal LocalDefinition FunctionArgsArray { get; set; }
 
         /// <summary>
         /// BoundBlock.Tag value indicating the block was emitted.
@@ -221,23 +276,45 @@ namespace Pchp.CodeAnalysis.CodeGen
         public SourceRoutineSymbol Routine => _routine;
 
         /// <summary>
-        /// Type context of currently emitted expressions.
-        /// Can be nested since we are emitting expressions analysed in context of another routine (like parameter default value).
+        /// For debug purposes.
+        /// Current routine being generated.
         /// </summary>
-        internal TypeRefContext TypeRefContext => (_emitTypeRefContext.Count == 0) ? this.Routine?.TypeRefContext : _emitTypeRefContext.Peek();
-        Stack<TypeRefContext> _emitTypeRefContext = new Stack<TypeRefContext>();
+        internal MethodSymbol DebugRoutine { get; set; }
+
+        /// <summary>
+        /// Type context of currently emitted expressions. Can be <c>null</c>.
+        /// </summary>
+        internal TypeRefContext TypeRefContext
+        {
+            get => _typeRefContext ?? this.Routine?.TypeRefContext;
+            set => _typeRefContext = value;
+        }
+        TypeRefContext _typeRefContext;
 
         public DiagnosticBag Diagnostics => _diagnostics;
 
         /// <summary>
         /// Whether to emit debug assertions.
         /// </summary>
-        public bool IsDebug => _optimizations == OptimizationLevel.Debug;
+        public bool IsDebug => _optimizations.IsDebug();
+
+        /// <summary>
+        /// Whether to emit sequence points (PDB).
+        /// </summary>
+        public bool EmitPdbSequencePoints => _emitPdbSequencePoints;
 
         /// <summary>
         /// Gets a reference to compilation object.
         /// </summary>
         public PhpCompilation DeclaringCompilation => _moduleBuilder.Compilation;
+
+        /// <summary>Gets <see cref="BoundTypeRefFactory"/> instance.</summary>
+        BoundTypeRefFactory BoundTypeRefFactory => DeclaringCompilation.TypeRefFactory;
+
+        /// <summary>
+        /// Gets conversions helper class.
+        /// </summary>
+        public Conversions Conversions => DeclaringCompilation.Conversions;
 
         /// <summary>
         /// Well known types.
@@ -260,24 +337,58 @@ namespace Pchp.CodeAnalysis.CodeGen
         public bool IsGlobalScope => _routine is SourceGlobalMethodSymbol;
 
         /// <summary>
+        /// Whether the code is generated inside method in a trait type.
+        /// </summary>
+        public bool IsInTrait => _routine is SourceMethodSymbol && _routine.ContainingType.IsTraitType();
+
+        /// <summary>
+        /// Gets or sets value determining <see cref="BoundArrayEx"/> is being emitted.
+        /// When set, array expression caching is disabled.
+        /// </summary>
+        internal bool IsInCachedArrayExpression { get; set; }
+
+        /// <summary>
         /// Type of the caller context (the class declaring current method) or null.
         /// </summary>
-        public TypeSymbol CallerType => (_routine is SourceMethodSymbol) ? _routine.ContainingType : null;
+        public TypeSymbol CallerType
+        {
+            get => GetSelfType(_callerType ?? (_routine is SourceMethodSymbol ? _routine.ContainingType : null));
+            set => _callerType = value;
+        }
+        TypeSymbol _callerType;
+        IPlace _callerTypePlace;
+
+        static TypeSymbol GetSelfType(TypeSymbol scope) => scope is SourceTraitTypeSymbol t ? t.TSelfParameter : scope;
+
+        public SourceFileSymbol ContainingFile
+        {
+            get => _containingFile;
+            internal set => _containingFile = value;
+        }
+        SourceFileSymbol _containingFile;
+
+        internal ExitBlock ExitBlock => ((ExitBlock)this.Routine.ControlFlowGraph.Exit);
 
         #endregion
 
         #region Construction
 
-        public CodeGenerator(ILBuilder il, PEModuleBuilder moduleBuilder, DiagnosticBag diagnostics, OptimizationLevel optimizations, bool emittingPdb,
-            NamedTypeSymbol container, IPlace contextPlace, IPlace thisPlace)
+        public CodeGenerator(ILBuilder il, PEModuleBuilder moduleBuilder, DiagnosticBag diagnostics, PhpOptimizationLevel optimizations, bool emittingPdb,
+            NamedTypeSymbol container, IPlace contextPlace, IPlace thisPlace, MethodSymbol routine = null, IPlace locals = null, bool localsInitialized = false, IPlace tempLocals = null)
         {
             Contract.ThrowIfNull(il);
             Contract.ThrowIfNull(moduleBuilder);
-            
+
+            if (localsInitialized) { Debug.Assert(locals != null); }
+
             _il = il;
             _moduleBuilder = moduleBuilder;
             _optimizations = optimizations;
             _diagnostics = diagnostics;
+
+            _localsPlaceOpt = locals;
+            _tmpLocalsPlace = tempLocals;
+            _localsInitialized = localsInitialized;
 
             _emmittedTag = 0;
 
@@ -287,20 +398,39 @@ namespace Pchp.CodeAnalysis.CodeGen
             _factory = new DynamicOperationFactory(this, container);
 
             _emitPdbSequencePoints = emittingPdb;
+
+            _routine = routine as SourceRoutineSymbol;
+            _containingFile = GetContainingFile(routine);
+
+            if (EmitPdbSequencePoints && _containingFile != null)
+            {
+                il.SetInitialDebugDocument(_containingFile.SyntaxTree);
+            }
         }
 
-        public CodeGenerator(SourceRoutineSymbol routine, ILBuilder il, PEModuleBuilder moduleBuilder, DiagnosticBag diagnostics, OptimizationLevel optimizations, bool emittingPdb)
-            :this(il, moduleBuilder, diagnostics, optimizations, emittingPdb, routine.ContainingType, routine.GetContextPlace(), routine.GetThisPlace())
+        /// <summary>
+        /// Copy ctor with different routine content (and TypeRefContext).
+        /// Used for emitting in a context of a different routine (parameter initializer).
+        /// </summary>
+        public CodeGenerator(CodeGenerator cg, SourceRoutineSymbol routine)
+            : this(cg._il, cg._moduleBuilder, cg._diagnostics, cg._optimizations, cg._emitPdbSequencePoints, routine.ContainingType, cg.ContextPlaceOpt, cg.ThisPlaceOpt, routine, cg._localsPlaceOpt, cg.InitializedLocals)
+        {
+            _emmittedTag = cg._emmittedTag;
+            GeneratorStateLocal = cg.GeneratorStateLocal;
+            ExtraFinallyBlock = cg.ExtraFinallyBlock;
+        }
+
+        public CodeGenerator(SourceRoutineSymbol routine, ILBuilder il, PEModuleBuilder moduleBuilder, DiagnosticBag diagnostics, PhpOptimizationLevel optimizations, bool emittingPdb)
+            : this(il, moduleBuilder, diagnostics, optimizations, emittingPdb, routine.ContainingType, routine.GetContextPlace(moduleBuilder), routine.GetThisPlace(), routine)
         {
             Contract.ThrowIfNull(routine);
 
-            if (routine.ControlFlowGraph == null)
-                throw new ArgumentException();
+            _emmittedTag = (routine.ControlFlowGraph != null) ? routine.ControlFlowGraph.NewColor() : -1;
 
-            _routine = routine;
-            
-            _emmittedTag = routine.ControlFlowGraph.NewColor();
-            _localsPlaceOpt = GetLocalsPlace(routine);
+            bool localsAlreadyInited;
+            _localsPlaceOpt = GetLocalsPlace(routine, out localsAlreadyInited);
+            _localsInitialized = localsAlreadyInited;
+
 
             // Emit sequence points unless
             // - the PDBs are not being generated
@@ -311,23 +441,43 @@ namespace Pchp.CodeAnalysis.CodeGen
             _emitPdbSequencePoints = emittingPdb && true; // routine.GenerateDebugInfo;
         }
 
-        IPlace GetLocalsPlace(SourceRoutineSymbol routine)
+        static SourceFileSymbol GetContainingFile(MethodSymbol method)
+        {
+            if (ReferenceEquals(method, null)) return null;
+            if (method is SourceRoutineSymbol r) return r.ContainingFile;
+
+            for (var t = method.ContainingType; t != null; t = t.ContainingType)
+            {
+                if (t is SourceFileSymbol s) return s;
+                if (t is SourceTypeSymbol st) return st.ContainingFile;
+            }
+
+            return null;
+        }
+
+        //Gets appropriate locals place and whether it's inicialized externally or not.
+        IPlace GetLocalsPlace(SourceRoutineSymbol routine, out bool localsAlreadyInitialized)
         {
             if (routine is SourceGlobalMethodSymbol)
             {
                 // second parameter
                 Debug.Assert(routine.ParameterCount >= 2 && routine.Parameters[1].Name == SpecialParameterSymbol.LocalsName);
+
+                localsAlreadyInitialized = true;
                 return new ParamPlace(routine.Parameters[1]);
             }
             else if ((routine.Flags & RoutineFlags.RequiresLocalsArray) != 0)
             {
                 // declare PhpArray <locals>
                 var symbol = new SynthesizedLocalSymbol(Routine, "<locals>", CoreTypes.PhpArray);
-                var localsDef = this.Builder.LocalSlotManager.DeclareLocal((Cci.ITypeReference)symbol.Type, symbol, symbol.Name, SynthesizedLocalKind.OptimizerTemp, LocalDebugId.None, 0, LocalSlotConstraints.None, false, default(ImmutableArray<TypedConstant>), false);
+                var localsDef = this.Builder.LocalSlotManager.DeclareLocal((Cci.ITypeReference)symbol.Type, symbol, symbol.Name, SynthesizedLocalKind.EmitterTemp, LocalDebugId.None, 0, LocalSlotConstraints.None, ImmutableArray<bool>.Empty, ImmutableArray<string>.Empty, false);
+
+                localsAlreadyInitialized = false;
                 return new LocalPlace(localsDef);
             }
 
             //
+            localsAlreadyInitialized = false;
             return null;
         }
 
@@ -340,7 +490,8 @@ namespace Pchp.CodeAnalysis.CodeGen
         /// </summary>
         internal void Generate()
         {
-            GenerateScope(_routine.ControlFlowGraph.Start, int.MaxValue);
+            Debug.Assert(_routine != null && _routine.ControlFlowGraph != null);
+            _routine.Generate(this);
         }
 
         internal void GenerateScope(BoundBlock block, int to)
@@ -351,7 +502,7 @@ namespace Pchp.CodeAnalysis.CodeGen
         internal void GenerateScope(BoundBlock block, ScopeType type, int to)
         {
             Contract.ThrowIfNull(block);
-            
+
             // open scope
             _scope = new LocalScope(this, _scope, type, block.Ordinal, to);
             _scope.ContinueWith(block);
@@ -378,7 +529,7 @@ namespace Pchp.CodeAnalysis.CodeGen
             // mark the block as emitted
             Debug.Assert(block.Tag != _emmittedTag);
             block.Tag = _emmittedTag;
-            
+
             // mark location as a label
             // to allow branching to the block
             _il.MarkLabel(block);
@@ -395,8 +546,7 @@ namespace Pchp.CodeAnalysis.CodeGen
         /// </summary>
         internal void Generate(IGenerator element)
         {
-            if (element != null)
-                element.Generate(this);
+            element?.Generate(this);
         }
 
         /// <summary>
@@ -406,6 +556,15 @@ namespace Pchp.CodeAnalysis.CodeGen
         {
             Contract.ThrowIfNull(block);
             return block.Tag == _emmittedTag;
+        }
+
+        #endregion
+
+        #region IDisposable
+
+        void IDisposable.Dispose()
+        {
+
         }
 
         #endregion
@@ -420,5 +579,13 @@ namespace Pchp.CodeAnalysis.CodeGen
         /// Emits IL into the underlaying <see cref="ILBuilder"/>.
         /// </summary>
         void Generate(CodeGenerator cg);
+    }
+
+    [DebuggerDisplay("Label {_name}")]
+    internal sealed class NamedLabel
+    {
+        readonly string _name;
+
+        public NamedLabel(string name) { _name = name; }
     }
 }

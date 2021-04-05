@@ -3,6 +3,7 @@ using Devsense.PHP.Syntax.Ast;
 using Devsense.PHP.Text;
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
@@ -54,7 +55,7 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
             public string Label;
 
             /// <summary>
-            /// Positions of label definition and last label use.
+            /// Positions of label definition and/or last label use.
             /// </summary>
             public Span LabelSpan;
 
@@ -96,14 +97,20 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
         /// <summary>
         /// Array of labels within routine. Can be <c>null</c>.
         /// </summary>
-        public LabelBlockState[] Labels { get { return _labels; } }
-        readonly LabelBlockState[] _labels;
+        public ImmutableArray<LabelBlockState> Labels { get { return _labels; } }
+        readonly ImmutableArray<LabelBlockState> _labels;
+
+        /// <summary>
+        /// Array of yield statements within routine. Can be <c>null</c>.
+        /// </summary>
+        public ImmutableArray<BoundYieldStatement> Yields { get => _yields; }
+        readonly ImmutableArray<BoundYieldStatement> _yields;
 
         /// <summary>
         /// List of blocks that are unreachable syntactically (statements after JumpStmt etc.).
         /// </summary>
-        public List<BoundBlock>/*!*/UnreachableBlocks { get { return _unrecachable; } }
-        readonly List<BoundBlock>/*!*/_unrecachable;
+        public ImmutableArray<BoundBlock>/*!*/UnreachableBlocks { get { return _unreachable; } }
+        readonly ImmutableArray<BoundBlock>/*!*/_unreachable;
 
         /// <summary>
         /// Last "tag" color used. Used internally for graph algorithms.
@@ -114,26 +121,44 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
 
         #region Construction
 
-        internal ControlFlowGraph(IList<Statement>/*!*/statements, SemanticsBinder/*!*/binder, NamingContext naming)
-            : this(BuilderVisitor.Build(statements, binder, naming))
+        internal ControlFlowGraph(IList<Statement>/*!*/statements, SemanticsBinder/*!*/binder)
+            : this(BuilderVisitor.Build(statements, binder), binder.Yields)
         {
         }
 
-        private ControlFlowGraph(BuilderVisitor/*!*/builder)
-            : this(builder.Start, builder.Exit, /*builder.Exception*/null, builder.Labels, builder.DeadBlocks)
+        private ControlFlowGraph(BuilderVisitor/*!*/builder, ImmutableArray<BoundYieldStatement> yields)
+            : this(builder.Start, builder.Exit, builder.Declarations, /*builder.Exception*/null, builder.Labels, yields, builder.DeadBlocks)
         {
         }
 
-        private ControlFlowGraph(BoundBlock/*!*/start, BoundBlock/*!*/exit, BoundBlock exception, LabelBlockState[] labels, List<BoundBlock> unreachable)
+        private ControlFlowGraph(BoundBlock/*!*/start, BoundBlock/*!*/exit, IEnumerable<BoundStatement>/*!*/declarations, BoundBlock exception, ImmutableArray<LabelBlockState> labels, ImmutableArray<BoundYieldStatement> yields, ImmutableArray<BoundBlock> unreachable)
         {
             Contract.ThrowIfNull(start);
             Contract.ThrowIfNull(exit);
 
             _start = start;
             _exit = exit;
+            _start.Statements.InsertRange(0, declarations);
+
             //_exception = exception;
             _labels = labels;
-            _unrecachable = unreachable ?? new List<BoundBlock>();
+            _yields = yields;
+            _unreachable = unreachable;
+        }
+
+        internal ControlFlowGraph Update(BoundBlock start, BoundBlock exit, ImmutableArray<LabelBlockState> labels, ImmutableArray<BoundYieldStatement> yields, ImmutableArray<BoundBlock> unreachable)
+        {
+            if (start == _start && exit == _exit && labels == _labels && yields == _yields && unreachable == _unreachable)
+            {
+                return this;
+            }
+            else
+            {
+                return new ControlFlowGraph(start, exit, ImmutableArray<BoundStatement>.Empty, null, labels, yields, unreachable)
+                {
+                    _lastcolor = this._lastcolor
+                };
+            }
         }
 
         #endregion
@@ -152,6 +177,6 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
         /// Unreachable blocks are not visited.
         /// </summary>
         /// <remarks>Visitor does not implement infinite recursion prevention.</remarks>
-        public void Visit(GraphVisitor/*!*/visitor) => visitor.VisitCFG(this);
+        public TResult Accept<TResult>(GraphVisitor<TResult> visitor) => visitor.VisitCFG(this);
     }
 }

@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using static Pchp.Core.PhpExtensionAttribute;
 
 namespace Pchp.Library
 {
@@ -11,7 +12,7 @@ namespace Pchp.Library
 	/// PHP output control functions implementation. 
 	/// </summary>
 	/// <threadsafety static="true"/>
-    //[ImplementsExtension(LibraryDescriptor.ExtCore)]
+    [PhpExtension(KnownExtensionNames.Standard)]
     public static class Output
     {
         public const int PHP_OUTPUT_HANDLER_START = (int)BufferedOutput.ChunkPosition.First;
@@ -29,9 +30,18 @@ namespace Pchp.Library
         /// <returns>Returns the length of the outputted string. </returns>
         public static int printf(Context ctx, string format, params PhpValue[] args)
         {
-            var formattedString = Strings.FormatInternal(ctx, format, args);
-            ctx.Output.Write(formattedString);
-            return formattedString.Length;
+            var result = Strings.FormatInternal(ctx, format, args);
+            if (result != null)
+            {
+                ctx.Output.Write(result);
+                return result.Length;
+            }
+            else
+            {
+                //PhpException.Throw(PhpError.Warning, Resources.LibResources.too_few_arguments);
+                //return 0;
+                throw new Spl.ArgumentCountError();
+            }
         }
 
         /// <summary>
@@ -61,7 +71,7 @@ namespace Pchp.Library
         /// <param name="chunkSize">Not supported.</param>
         /// <param name="erase">Not supported.</param>
         /// <returns>Whether the filter is valid callback.</returns>
-        public static bool ob_start(Context ctx, Delegate filter = null, int chunkSize = 0, bool erase = true)
+        public static bool ob_start(Context ctx, IPhpCallable filter = null, int chunkSize = 0, bool erase = true)
         {
             if (chunkSize != 0)
                 //PhpException.ArgumentValueNotSupported("chunkSize", "!= 0");
@@ -120,13 +130,15 @@ namespace Pchp.Library
 
             if (buf.Level == 0)
             {
-                //PhpException.Throw(PhpError.Notice, CoreResources.GetString("output_buffering_disabled"));
-                //return false;
-                throw new NotImplementedException();
+                // "failed to delete buffer. No buffer to delete"
+                PhpException.Throw(PhpError.Notice, Core.Resources.ErrResources.output_buffering_disabled);
+                return false;
             }
 
             if (buf.DecreaseLevel(flush) < 0)
+            {
                 ctx.IsOutputBuffered = false;
+            }
 
             return true;
         }
@@ -139,32 +151,36 @@ namespace Pchp.Library
         /// Gets the contents of the current buffer and cleans it.
         /// </summary>
         /// <returns>The content of type <see cref="string"/> or <see cref="byte"/> or <c>false</c>.</returns>
-        public static PhpValue ob_get_clean(Context ctx)
+        [return: CastToFalse]
+        public static PhpString ob_get_clean(Context ctx)
         {
-            BufferedOutput bo = ctx.BufferedOutput;
+            var bo = ctx.BufferedOutput;
 
             var result = bo.GetContent();
             bo.Clean();
             EndInternal(ctx, true);
-            return result;
+
+            return result;  // string or FALSE
         }
 
         /// <summary>
         /// Gets the content of the current buffer.
         /// </summary>
         /// <returns>The content of type <see cref="string"/> or <see cref="byte"/> or <c>false</c>.</returns>
-        public static PhpValue ob_get_contents(Context ctx)
+        [return: CastToFalse]
+        public static PhpString ob_get_contents(Context ctx)
         {
-            return ctx.BufferedOutput.GetContent();
+            return ctx.BufferedOutput.GetContent(); // string or FALSE
         }
 
         /// <summary>
         /// Gets the content of the current buffer and decreases the level of buffering.
         /// </summary>
         /// <returns>The content of the buffer.</returns>
-        public static PhpValue ob_get_flush(Context ctx)
+        [return: CastToFalse]
+        public static PhpString ob_get_flush(Context ctx)
         {
-            BufferedOutput bo = ctx.BufferedOutput;
+            var bo = ctx.BufferedOutput;
 
             var result = bo.GetContent();
             EndInternal(ctx, true);
@@ -187,7 +203,7 @@ namespace Pchp.Library
         public static PhpValue ob_get_length(Context ctx)
         {
             var length = ctx.BufferedOutput.Length;
-            return (length >= 0) ? PhpValue.Create(length) : PhpValue.False; 
+            return (length >= 0) ? PhpValue.Create(length) : PhpValue.False;
         }
 
         /// <summary>
@@ -209,9 +225,11 @@ namespace Pchp.Library
 
             if (full)
             {
-                result = new PhpArray(bo.Level, 0);
+                result = new PhpArray(bo.Level);
                 for (int i = 1; i <= bo.Level; i++)
+                {
                     result.Add(i, GetLevelStatus(bo, i));
+                }
             }
             else if (bo.Level > 0)
             {
@@ -220,7 +238,7 @@ namespace Pchp.Library
             }
             else
             {
-                result = new PhpArray(0, 0);
+                result = PhpArray.NewEmpty();
             }
 
             return result;
@@ -228,16 +246,17 @@ namespace Pchp.Library
 
         private static PhpArray/*!*/ GetLevelStatus(BufferedOutput/*!*/ bo, int index)
         {
-            PhpArray result = new PhpArray(0, 3);
+            var result = new PhpArray(3);
 
-            Delegate filter;
+            IPhpCallable filter;
             int size;
-            bo.GetLevelInfo(index, out filter, out size);
+            string name;
+            bo.GetLevelInfo(index, out filter, out size, out name);
 
             if (filter != null)
             {
                 result.Add("type", 1);
-                result.Add("name", filter.ToString());
+                result.Add("name", name);
             }
             else
             {
@@ -258,9 +277,14 @@ namespace Pchp.Library
         /// </summary>
         public static void flush(Context ctx)
         {
-            //var http_context = ctx.TryGetProperty<HttpContext>();
-            //if (http_context != null) http_context.Response.Flush();
-            throw new NotImplementedException(); // move to pchplib.web.dll
+            try
+            {
+                ctx.HttpPhpContext?.Flush(endRequest: false);
+            }
+            catch (ObjectDisposedException)
+            {
+                // connection closed
+            }
         }
 
         /// <summary>
@@ -270,7 +294,7 @@ namespace Pchp.Library
         /// </summary>
         public static void ob_flush(Context ctx)
         {
-            ctx.BufferedOutput.Flush();
+            ctx.BufferedOutput.FlushLevel();
         }
 
         #endregion
@@ -320,7 +344,7 @@ namespace Pchp.Library
         public static PhpArray ob_list_handlers(Context ctx)
         {
             BufferedOutput bo = ctx.BufferedOutput;
-            PhpArray result = new PhpArray(bo.Level, 0);
+            var result = new PhpArray(bo.Level);
 
             for (int i = 0; i < bo.Level; i++)
             {
@@ -329,117 +353,6 @@ namespace Pchp.Library
 
             return result;
         }
-
-        #endregion
-
-        #region ob_gzhandler
-
-        ///// <summary>
-        ///// Compresses data by gzip compression. Not supported.
-        ///// </summary>
-        ///// <param name="data">Data to compress.</param>
-        ///// <returns>Compressed data.</returns>
-        //[ImplementsFunction("ob_gzhandler")]
-        //public static PhpBytes GzipHandler(string data)
-        //{
-        //    return GzipHandler(data, 4);
-        //}
-
-        /// <summary>
-        /// Available content encodings.
-        /// </summary>
-        /// <remarks>Values correspond to "content-encoding" response header.</remarks>
-        private enum ContentEncoding
-        {
-            gzip, deflate
-        }
-
-        /// <summary>
-        /// Compresses data by gzip compression.
-        /// </summary>
-        /// <param name="ctx">Current runtime context.</param>
-        /// <param name="data">Data to be compressed.</param>
-        /// <param name="mode">Compression mode.</param>
-        /// <returns>Compressed data or <c>FALSE</c>.</returns>
-        /// <remarks>The function does not support subsequent calls to compress more chunks of data subsequentally.</remarks>
-        public static PhpValue ob_gzhandler(Context ctx, PhpValue data, int mode)
-        {
-            //// TODO: mode is not passed by Core properly. Therefore it is not possible to make subsequent calls to this handler.
-            //// Otherwise headers of ZIP stream will be mishmashed.
-
-            //// check input data
-            //if (data == null) return false;
-
-            //// check if we are running web application
-            //var httpcontext = ctx.TryGetProperty<HttpContext>();
-            //System.Collections.Specialized.NameValueCollection headers;
-            //if (httpcontext == null ||
-            //    httpcontext.Request == null ||
-            //    (headers = httpcontext.Request.Headers) == null)
-            //    return data ?? false;
-
-            //// check if compression is supported by browser
-            //string acceptEncoding = headers["Accept-Encoding"];
-
-            //if (acceptEncoding != null)
-            //{
-            //    acceptEncoding = acceptEncoding.ToLowerInvariant();
-
-            //    if (acceptEncoding.Contains("gzip"))
-            //        return DoGzipHandler(ctx, data, httpcontext, ContentEncoding.gzip);
-
-            //    if (acceptEncoding.Contains("*") || acceptEncoding.Contains("deflate"))
-            //        return DoGzipHandler(ctx, data, httpcontext, ContentEncoding.deflate);
-            //}
-
-            //return data ?? false;
-            throw new NotImplementedException(); // move to pchplib.web.dll
-        }
-
-        ///// <summary>
-        ///// Compress given data using compressor named in contentEncoding. Set the response header accordingly.
-        ///// </summary>
-        ///// <param name="data">PhpBytes or string to be compressed.</param>
-        ///// <param name="httpcontext">Current HttpContext.</param>
-        ///// <param name="contentEncoding">gzip or deflate</param>
-        ///// <returns>Byte stream of compressed data.</returns>
-        //private static byte[] DoGzipHandler(Context ctx, PhpValue data, HttpContext/*!*/httpcontext, ContentEncoding contentEncoding)
-        //{
-        //    PhpBytes phpbytes = data as PhpBytes;
-
-        //    var inputbytes = (phpbytes != null) ?
-        //        phpbytes.ReadonlyData :
-        //        Configuration.Application.Globalization.PageEncoding.GetBytes(PHP.Core.Convert.ObjectToString(data));
-
-        //    using (var outputStream = new System.IO.MemoryStream())
-        //    {
-        //        System.IO.Stream compressionStream;
-        //        switch (contentEncoding)
-        //        {
-        //            case ContentEncoding.gzip:
-        //                compressionStream = new System.IO.Compression.GZipStream(outputStream, System.IO.Compression.CompressionMode.Compress);
-        //                break;
-        //            case ContentEncoding.deflate:
-        //                compressionStream = new System.IO.Compression.DeflateStream(outputStream, System.IO.Compression.CompressionMode.Compress);
-        //                break;
-        //            default:
-        //                throw new ArgumentException("Not recognized content encoding to be compressed to.", "contentEncoding");
-        //        }
-
-        //        using (compressionStream)
-        //        {
-        //            compressionStream.Write(inputbytes, 0, inputbytes.Length);
-        //        }
-
-        //        //Debug.Assert(
-        //        //    ScriptContext.CurrentContext.Headers["content-encoding"] != contentEncoding,
-        //        //    "The content encoding was already set to '" + contentEncoding + "'. The ob_gzhandler() was called subsequently probably.");
-
-        //        ctx.Headers["content-encoding"] = contentEncoding.ToString();
-
-        //        return outputStream.ToArray();
-        //    }
-        //}
 
         #endregion
     }

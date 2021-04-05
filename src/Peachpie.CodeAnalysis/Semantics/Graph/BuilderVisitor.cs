@@ -1,8 +1,10 @@
 ﻿using Devsense.PHP.Syntax;
 using Devsense.PHP.Syntax.Ast;
 using Devsense.PHP.Text;
+using Pchp.CodeAnalysis.Symbols;
 using System;
 using System.Collections.Generic;
+using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Linq;
 using System.Text;
@@ -22,8 +24,16 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
         private Stack<TryCatchEdge> _tryTargets;
         private Stack<LocalScopeInfo> _scopes = new Stack<LocalScopeInfo>(1);
         private int _index = 0;
-        private NamingContext _naming;
-        
+
+        /// <summary>Counts visited "return" statements.</summary>
+        private int _returnCounter = 0;
+
+        /// <summary>
+        /// Gets enumeration of unconditional declarations.
+        /// </summary>
+        public IEnumerable<BoundStatement> Declarations => _declarations ?? Enumerable.Empty<BoundStatement>();
+        public List<BoundStatement> _declarations;
+
         public BoundBlock/*!*/Start { get; private set; }
         public BoundBlock/*!*/Exit { get; private set; }
         //public BoundBlock Exception { get; private set; }
@@ -31,33 +41,39 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
         /// <summary>
         /// Gets labels defined within the routine.
         /// </summary>
-        public ControlFlowGraph.LabelBlockState[] Labels
+        public ImmutableArray<ControlFlowGraph.LabelBlockState> Labels
         {
-            get { return (_labels != null) ? _labels.Values.ToArray() : EmptyArray<ControlFlowGraph.LabelBlockState>.Instance; }
+            get { return (_labels != null) ? _labels.Values.ToImmutableArray() : ImmutableArray<ControlFlowGraph.LabelBlockState>.Empty; }
         }
 
         /// <summary>
         /// Blocks we know nothing is pointing to (right after jump, throw, etc.).
         /// </summary>
-        public List<BoundBlock>/*!*/DeadBlocks { get { return _deadBlocks; } }
+        public ImmutableArray<BoundBlock>/*!*/DeadBlocks { get { return _deadBlocks.ToImmutableArray(); } }
         private readonly List<BoundBlock>/*!*/_deadBlocks = new List<BoundBlock>();
 
         #region LocalScope
 
+        private enum LocalScope
+        {
+            Code, Try, Catch, Finally,
+        }
+
         private class LocalScopeInfo
         {
-            public BoundBlock FirstBlock => _firstblock;
-            private BoundBlock _firstblock;
+            public BoundBlock FirstBlock { get; }
+            public LocalScope Scope { get; }
 
-            public LocalScopeInfo(BoundBlock firstBlock)
+            public LocalScopeInfo(BoundBlock firstBlock, LocalScope scope)
             {
-                _firstblock = firstBlock;
+                this.FirstBlock = firstBlock;
+                this.Scope = scope;
             }
         }
 
-        private void OpenScope(BoundBlock block)
+        private void OpenScope(BoundBlock block, LocalScope scope = LocalScope.Code)
         {
-            _scopes.Push(new LocalScopeInfo(block));
+            _scopes.Push(new LocalScopeInfo(block, scope));
         }
 
         private void CloseScope()
@@ -124,11 +140,15 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
 
         private void OpenTryScope(TryCatchEdge edge)
         {
-            if (_tryTargets == null) _tryTargets = new Stack<TryCatchEdge>();
+            if (_tryTargets == null)
+            {
+                _binder.WithTryScopes(_tryTargets = new Stack<TryCatchEdge>());
+            }
+
             _tryTargets.Push(edge);
         }
 
-        private void CloeTryScope()
+        private void CloseTryScope()
         {
             Debug.Assert(_tryTargets != null && _tryTargets.Count != 0);
             _tryTargets.Pop();
@@ -138,20 +158,23 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
 
         #region Construction
 
-        private BuilderVisitor(IList<Statement>/*!*/statements, SemanticsBinder/*!*/binder, NamingContext naming)
+        private BuilderVisitor(IList<Statement>/*!*/statements, SemanticsBinder/*!*/binder)
         {
             Contract.ThrowIfNull(statements);
             Contract.ThrowIfNull(binder);
 
-            _binder = binder;
-            _naming = naming;
+            // setup the binder
+            binder.SetupBuilder(this.NewBlock);
 
-            this.Start = new StartBlock() { Naming = _naming };
+            _binder = binder;
+
+            this.Start = WithNewOrdinal(new StartBlock());
             this.Exit = new ExitBlock();
 
             _current = WithOpenScope(this.Start);
 
             statements.ForEach(this.VisitElement);
+            FinalizeRoutine();
             _current = Connect(_current, this.Exit);
 
             //
@@ -164,9 +187,9 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
             Debug.Assert(_breakTargets == null || _breakTargets.Count == 0);
         }
 
-        public static BuilderVisitor/*!*/Build(IList<Statement>/*!*/statements, SemanticsBinder/*!*/binder, NamingContext naming)
+        public static BuilderVisitor/*!*/Build(IList<Statement>/*!*/statements, SemanticsBinder/*!*/binder)
         {
-            return new BuilderVisitor(statements, binder, naming);
+            return new BuilderVisitor(statements, binder);
         }
 
         #endregion
@@ -183,12 +206,58 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
 
         private void Add(Statement stmt)
         {
-            _current.Add(_binder.BindStatement(stmt));
+            Add(_binder.BindWholeStatement(stmt));
+        }
+
+        private void Add(BoundItemsBag<BoundStatement> stmtBag)
+        {
+            ConnectBoundItemsBagBlocksToCurrentBlock(stmtBag);
+            _current.Add(stmtBag.BoundElement);
+        }
+
+        private void ConnectBoundItemsBagBlocksToCurrentBlock<T>(BoundItemsBag<T> bag) where T : class, IPhpOperation
+        {
+            _current = ConnectBoundItemsBagBlocks(bag, _current);
+        }
+
+        private BoundBlock ConnectBoundItemsBagBlocks<T>(BoundItemsBag<T> bag, BoundBlock block) where T : class, IPhpOperation
+        {
+            if (bag.IsOnlyBoundElement) { return block; }
+
+            Connect(block, bag.PreBoundBlockFirst);
+            return bag.PreBoundBlockLast;
+        }
+
+        private void FinalizeRoutine()
+        {
+            if (!_deadBlocks.Contains(_current))
+            {
+                AddFinalReturn();
+            }
+        }
+
+        private void AddFinalReturn()
+        {
+            BoundExpression expression;
+
+            if (_binder.Routine.IsGlobalScope)
+            {
+                // global code returns 1 by default if no other value is specified
+                expression = new BoundLiteral(1).WithAccess(BoundAccess.Read);
+            }
+            else
+            {
+                // function returns NULL by default (void?)
+                expression = null; // void
+            }
+
+            // return <expression>;
+            _current.Add(new BoundReturnStatement(expression));
         }
 
         private BoundBlock/*!*/NewBlock()
         {
-            return WithNewOrdinal(new BoundBlock() { Naming = _naming });
+            return WithNewOrdinal(new BoundBlock());
         }
 
         /// <summary>
@@ -197,7 +266,7 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
         /// </summary>
         private BoundBlock/*!*/NewDeadBlock()
         {
-            var block = new BoundBlock() { Naming = _naming };
+            var block = new BoundBlock();
             block.Ordinal = -1; // unreachable
             _deadBlocks.Add(block);
             return block;
@@ -205,22 +274,27 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
 
         private CatchBlock/*!*/NewBlock(CatchItem item)
         {
-            return WithNewOrdinal(new CatchBlock(_binder.BindTypeRef(item.TargetType), _binder.BindCatchVariable(item)) { PhpSyntax = item, Naming = _naming });
+            return WithNewOrdinal(new CatchBlock(_binder.BindTypeRef(item.TargetType), _binder.BindCatchVariable(item)) { PhpSyntax = item });
         }
 
         private CaseBlock/*!*/NewBlock(SwitchItem item)
         {
-            var caseitem = item as CaseItem;
-            BoundExpression caseValue =  // null => DefaultItem
-                (caseitem != null) ? _binder.BindExpression(caseitem.CaseVal, BoundAccess.Read) : null;
-            return WithNewOrdinal(new CaseBlock(caseValue) { PhpSyntax = item, Naming = _naming });
+            BoundItemsBag<BoundExpression> caseValueBag = item is CaseItem caseItem
+                ? _binder.BindWholeExpression(caseItem.CaseVal, BoundAccess.Read)
+                : BoundItemsBag<BoundExpression>.Empty; // BoundItem -eq null => DefaultItem
+
+            return WithNewOrdinal(new CaseBlock(caseValueBag) { PhpSyntax = item });
         }
 
         private BoundBlock/*!*/Connect(BoundBlock/*!*/source, BoundBlock/*!*/ifTarget, BoundBlock/*!*/elseTarget, Expression condition, bool isloop = false)
         {
             if (condition != null)
             {
-                new ConditionalEdge(source, ifTarget, elseTarget, _binder.BindExpression(condition, BoundAccess.Read))
+                // bind condition expression & connect pre-condition blocks to source
+                var boundConditionBag = _binder.BindWholeExpression(condition, BoundAccess.Read);
+                source = ConnectBoundItemsBagBlocks(boundConditionBag, source);
+
+                new ConditionalEdge(source, ifTarget, elseTarget, boundConditionBag.BoundElement)
                 {
                     IsLoop = isloop,
                 };
@@ -277,9 +351,9 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
             return block;
         }
 
-        private T WithOpenScope<T>(T block) where T : BoundBlock
+        private T WithOpenScope<T>(T block, LocalScope scope = LocalScope.Code) where T : BoundBlock
         {
-            OpenScope(block);
+            OpenScope(block, scope);
             return block;
         }
 
@@ -287,13 +361,97 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
 
         #region Declaration Statements
 
+        void AddUnconditionalDeclaration(BoundStatement decl)
+        {
+            if (_declarations == null)
+            {
+                _declarations = new List<BoundStatement>();
+            }
+
+            _declarations.Add(decl);
+        }
+
         public override void VisitTypeDecl(TypeDecl x)
+        {
+            var bound = _binder.BindWholeStatement(x).SingleBoundElement();
+            if (DeclareConditionally(x))
+            {
+                _current.Add(bound);
+            }
+            else
+            {
+                AddUnconditionalDeclaration(bound);
+            }
+        }
+
+        bool DeclareConditionally(TypeDecl x)
         {
             if (x.IsConditional)
             {
-                Add(x);
+                return true;
             }
-            // ignored
+
+            if (_current == Start && _current.Statements.Count == 0)
+            {
+                return false;
+            }
+
+            // Helper that lookups for the type if it is declared unconditionally.
+            bool IsDeclared(QualifiedName qname)
+            {
+                if (_declarations != null &&
+                    _declarations.OfType<TypeDecl>().FirstOrDefault(t => t.QualifiedName == qname) != default)
+                {
+                    return true;
+                }
+
+                if (_binder.Routine.DeclaringCompilation.GlobalSemantics.ResolveType(qname) is NamedTypeSymbol named &&
+                    named.IsValidType() &&
+                    !named.IsPhpUserType()) // user types are not declared in compile time // CONSIDER: more flow analysis
+                {
+                    return true;
+                }
+
+                //
+                return false;
+            }
+
+            // the base class should be resolved first?
+            if (x.BaseClass != null)
+            {
+                if (!IsDeclared(x.BaseClass.ClassName))
+                    return true;
+            }
+
+            // the interface should be resolved first?
+            if (x.ImplementsList.Length != 0)
+            {
+                if (x.ImplementsList.OfType<ClassTypeRef>().Any(t => !IsDeclared(t.ClassName)))
+                    return true;
+            }
+
+            // the trait type should be resolved first?
+            foreach (var t in x.Members.OfType<TraitsUse>())
+            {
+                if (t.TraitsList.OfType<ClassTypeRef>().Any(tu => !IsDeclared(tu.ClassName)))
+                    return true;
+            }
+
+            // can be declared unconditionally
+            return false;
+        }
+
+        public override void VisitFunctionDecl(FunctionDecl x)
+        {
+            var bound = _binder.BindWholeStatement(x).SingleBoundElement();
+            if (x.IsConditional)
+            {
+                _current.Add(bound);
+            }
+            else
+            {
+                AddUnconditionalDeclaration(bound);
+            }
         }
 
         public override void VisitMethodDecl(MethodDecl x)
@@ -306,21 +464,10 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
             // ignored
         }
 
-        public override void VisitFunctionDecl(FunctionDecl x)
+        public override void VisitGlobalConstantDecl(GlobalConstantDecl x)
         {
-            if (x.IsConditional)
-            {
-                Add(x);
-            }
-            // ignored
-        }
-
-        public override void VisitNamespaceDecl(NamespaceDecl x)
-        {
-            _naming = x.Naming;
-            _current = Connect(_current, NewBlock());   // create new block with new naming
-
-            base.VisitNamespaceDecl(x);
+            var bound = _binder.BindGlobalConstantDecl(x);
+            _current.Add(bound);
         }
 
         #endregion
@@ -339,12 +486,18 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
 
         public override void VisitBlockStmt(BlockStmt x)
         {
+            Add(_binder.BindEmptyStmt(new Span(x.Span.Start, 1))); // {
+
             base.VisitBlockStmt(x); // visit nested statements
+
+            Add(_binder.BindEmptyStmt(new Span(x.Span.End - 1, 1))); // } // TODO: endif; etc.
         }
 
         public override void VisitDeclareStmt(DeclareStmt x)
         {
             Add(x);
+
+            base.VisitDeclareStmt(x); // visit inner statement, if present
         }
 
         public override void VisitGlobalCode(GlobalCode x)
@@ -366,7 +519,43 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
         {
             Add(x);
 
-            VisitElement(x.Expression as ExitEx);
+            if (x.Expression is ExitEx ee)
+            {
+                // NOTE: Added by VisitExpressionStmt already
+                // NOTE: similar to ThrowEx but unhandleable
+
+                // connect to Exception block
+                Connect(_current, this.GetExceptionBlock());
+                _current = NewDeadBlock();  // unreachable
+            }
+            else if (x.Expression is ThrowEx te)
+            {
+                //var tryedge = GetTryTarget();
+                //if (tryedge != null)
+                //{
+                //    // find handling catch block
+                //    QualifiedName qname;
+                //    var newex = x.Expression as NewEx;
+                //    if (newex != null && newex.ClassNameRef is DirectTypeRef)
+                //    {
+                //        qname = ((DirectTypeRef)newex.ClassNameRef).ClassName;
+                //    }
+                //    else
+                //    {
+                //        qname = new QualifiedName(Name.EmptyBaseName);
+                //    }
+
+                //    CatchBlock handlingCatch = tryedge.HandlingCatch(qname);
+                //    if (handlingCatch != null)
+                //    {
+                //        // throw jumps to a catch item in runtime
+                //    }
+                //}
+
+                // connect to Exception block
+                Connect(_current, this.GetExceptionBlock());
+                _current = NewDeadBlock();  // unreachable
+            }
         }
 
         public override void VisitUnsetStmt(UnsetStmt x)
@@ -392,18 +581,12 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
             throw new InvalidOperationException();  // should be handled by IfStmt
         }
 
-        public override void VisitExitEx(ExitEx x)
-        {
-            // NOTE: Added by VisitExpressionStmt already
-            // NOTE: similar to ThrowEx but unhandleable
-
-            // connect to Exception block
-            Connect(_current, this.GetExceptionBlock());    // unreachable
-            _current = NewDeadBlock();
-        }
-
         public override void VisitForeachStmt(ForeachStmt x)
         {
+            // binds enumeree expression & connect pre-enumeree-expr blocks
+            var boundEnumereeBag = _binder.BindWholeExpression(x.Enumeree, BoundAccess.Read);
+            ConnectBoundItemsBagBlocksToCurrentBlock(boundEnumereeBag);
+
             var end = NewBlock();
             var move = NewBlock();
             var body = NewBlock();
@@ -412,20 +595,30 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
 
             // ForeachEnumereeEdge : SimpleEdge
             // x.Enumeree.GetEnumerator();
-            var enumereeEdge = new ForeachEnumereeEdge(_current, move, _binder.BindExpression(x.Enumeree, BoundAccess.Read), x.ValueVariable.Alias);
+            var enumereeEdge = new ForeachEnumereeEdge(_current, move, boundEnumereeBag.BoundElement, x.ValueVariable.Alias);
 
             // ContinueTarget:
             OpenBreakScope(end, move);
 
-            // ForeachMoveNextEdge : ConditionalEdge
-            var moveEdge = new ForeachMoveNextEdge(move, body, end, enumereeEdge,
-                (x.KeyVariable != null) ? (BoundReferenceExpression)_binder.BindExpression(x.KeyVariable.Variable, BoundAccess.Write) : null,
-                (BoundReferenceExpression)_binder.BindExpression(
+            // bind reference expression for foreach key variable
+            var keyVar = (x.KeyVariable != null)
+                ? (BoundReferenceExpression)_binder.BindWholeExpression(x.KeyVariable.Variable, BoundAccess.Write).SingleBoundElement()
+                : null;
+
+            // bind reference expression for foreach value variable 
+            var valueVar = (BoundReferenceExpression)(_binder.BindWholeExpression(
                     (Expression)x.ValueVariable.Variable ?? x.ValueVariable.List,
-                    x.ValueVariable.Alias ? BoundAccess.Write.WithWriteRef(FlowAnalysis.TypeRefMask.AnyType) : BoundAccess.Write));
+                    x.ValueVariable.Alias ? BoundAccess.Write.WithWriteRef(FlowAnalysis.TypeRefMask.AnyType) : BoundAccess.Write)
+                .SingleBoundElement());
+
+            // ForeachMoveNextEdge : ConditionalEdge
+            var moveEdge = new ForeachMoveNextEdge(
+                move, body, end, enumereeEdge,
+                keyVar, valueVar,
+                x.GetMoveNextSpan());
             // while (enumerator.MoveNext()) {
-            //   var key = enumerator.Current.Key
             //   var value = enumerator.Current.Value
+            //   var key = enumerator.Current.Key
 
             // Block
             //   { x.Body }
@@ -442,7 +635,7 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
             _current = WithNewOrdinal(end);
         }
 
-        private void BuildForLoop(List<Expression> initExpr, List<Expression> condExpr, List<Expression> actionExpr, Statement/*!*/bodyStmt)
+        private void BuildForLoop(IList<Expression> initExpr, IList<Expression> condExpr, IList<Expression> actionExpr, Statement/*!*/bodyStmt)
         {
             var end = NewBlock();
 
@@ -493,6 +686,34 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
             _current = WithNewOrdinal(end);
         }
 
+        private void BuildDoLoop(Expression condExpr, Statement/*!*/bodyStmt)
+        {
+            var end = NewBlock();
+
+            var body = NewBlock();
+            var cond = NewBlock();
+
+            OpenBreakScope(end, cond);
+
+            // do { ...
+            _current = WithNewOrdinal(Connect(_current, body));
+
+            // x.Body
+            OpenScope(_current);
+            VisitElement(bodyStmt);
+            CloseScope();
+
+            // } while ( COND )
+            _current = WithNewOrdinal(Connect(_current, cond));
+            _current = WithNewOrdinal(Connect(_current, body, end, condExpr, true));
+
+            //
+            CloseBreakScope();
+
+            //
+            _current = WithNewOrdinal(end);
+        }
+
         public override void VisitForStmt(ForStmt x)
         {
             BuildForLoop(x.InitExList, x.CondExList, x.ActionExList, x.Body);
@@ -502,7 +723,13 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
         {
             var/*!*/label = GetLabelBlock(x.LabelName.Name.Value);
             label.Flags |= ControlFlowGraph.LabelBlockFlags.Used;   // label is used
-            
+
+            if (!label.LabelSpan.IsValid)
+            {
+                // remember label span if not declared
+                label.LabelSpan = x.LabelName.Span;
+            }
+
             Connect(_current, label.TargetBlock);
 
             _current.NextEdge.PhpSyntax = x;
@@ -512,9 +739,11 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
 
         public override void VisitJumpStmt(JumpStmt x)
         {
-
             if (x.Type == JumpStmt.Types.Return)
             {
+                _returnCounter++;
+
+                //
                 Add(x);
                 Connect(_current, this.Exit);
             }
@@ -534,13 +763,14 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
                 }
                 else
                 {
-                    throw new InvalidOperationException();   // TODO: ErrCode
-                    //Connect(_current, this.GetExceptionBlock());    // unreachable  // fatal error in PHP
+                    // fatal error in PHP:
+                    _binder.Diagnostics.Add(_binder.Routine, x, Errors.ErrorCode.ERR_NeedsLoopOrSwitch, x.Type.ToString().ToLowerInvariant());
+                    Connect(_current, this.GetExceptionBlock());    // unreachable, wouldn't compile
                 }
             }
             else
             {
-                throw new InvalidOperationException();
+                throw Peachpie.CodeAnalysis.Utilities.ExceptionUtilities.UnexpectedValue(x.Type);
             }
 
             _current = NewDeadBlock();  // anything after these statements is unreachable
@@ -591,7 +821,7 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
             }
 
             label.Flags |= ControlFlowGraph.LabelBlockFlags.Defined;        // label is defined
-            label.LabelSpan = x.Span;
+            label.LabelSpan = x.Name.Span;
 
             _current = WithNewOrdinal(Connect(_current, label.TargetBlock));
         }
@@ -601,6 +831,11 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
             var items = x.SwitchItems;
             if (items == null || items.Length == 0)
                 return;
+
+            // get bound item for switch value & connect potential pre-switch-value blocks
+            var boundBagForSwitchValue = _binder.BindWholeExpression(x.SwitchValue, BoundAccess.Read);
+            ConnectBoundItemsBagBlocksToCurrentBlock(boundBagForSwitchValue);
+            var switchValue = boundBagForSwitchValue.BoundElement;
 
             var end = NewBlock();
 
@@ -617,8 +852,17 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
                 cases.Add(NewBlock(new DefaultItem(x.Span, EmptyArray<Statement>.Instance)));
             }
 
+            // if switch value isn't a constant & there're case values with preBoundStatements 
+            // -> the switch value might get evaluated multiple times (see SwitchEdge.Generate) -> preemptively evaluate and cache it
+            if (!switchValue.IsConstant() && !cases.All(c => c.CaseValue.IsOnlyBoundElement))
+            {
+                var result = GeneratorSemanticsBinder.CreateAndAssignSynthesizedVariable(switchValue, BoundAccess.Read, $"<switchValueCacher>{x.Span}");
+                switchValue = result.BoundExpr;
+                _current.Add(new BoundExpressionStatement(result.Assignment));
+            }
+
             // SwitchEdge // Connects _current to cases
-            var edge = new SwitchEdge(_current, _binder.BindExpression(x.SwitchValue, BoundAccess.Read), cases.ToArray(), end);
+            var edge = new SwitchEdge(_current, switchValue, cases.ToImmutableArray(), end);
             _current = WithNewOrdinal(cases[0]);
 
             OpenBreakScope(end, end); // NOTE: inside switch, Continue ~ Break
@@ -640,35 +884,9 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
             Debug.Assert(_current == end);
         }
 
-        public override void VisitThrowStmt(ThrowStmt x)
+        public override void VisitThrowEx(ThrowEx x)
         {
-            Add(x);
-
-            //var tryedge = GetTryTarget();
-            //if (tryedge != null)
-            //{
-            //    // find handling catch block
-            //    QualifiedName qname;
-            //    var newex = x.Expression as NewEx;
-            //    if (newex != null && newex.ClassNameRef is DirectTypeRef)
-            //    {
-            //        qname = ((DirectTypeRef)newex.ClassNameRef).ClassName;
-            //    }
-            //    else
-            //    {
-            //        qname = new QualifiedName(Name.EmptyBaseName);
-            //    }
-
-            //    CatchBlock handlingCatch = tryedge.HandlingCatch(qname);
-            //    if (handlingCatch != null)
-            //    {
-            //        // throw jumps to a catch item in runtime
-            //    }
-            //}
-
-            // connect to Exception block
-            Connect(_current, this.GetExceptionBlock());
-            _current = NewDeadBlock();  // unreachable
+            base.VisitThrowEx(x);
         }
 
         public override void VisitTryStmt(TryStmt x)
@@ -685,43 +903,67 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
             var body = NewBlock();
 
             // init catch blocks and finally block
-            var catchBlocks = new CatchBlock[(x.Catches == null) ? 0 : x.Catches.Length];
+            var catchBlocks = ImmutableArray<CatchBlock>.Empty;
+            if (x.Catches != null)
+            {
+                var catchBuilder = ImmutableArray.CreateBuilder<CatchBlock>(x.Catches.Length);
+                for (int i = 0; i < x.Catches.Length; i++)
+                {
+                    catchBuilder.Add(NewBlock(x.Catches[i]));
+                }
+
+                catchBlocks = catchBuilder.MoveToImmutable();
+            }
+
             BoundBlock finallyBlock = null;
-
-            for (int i = 0; i < catchBlocks.Length; i++)
-                catchBlocks[i] = NewBlock(x.Catches[i]);
-
             if (x.FinallyItem != null)
                 finallyBlock = NewBlock();
 
             // TryCatchEdge // Connects _current to body, catch blocks and finally
             var edge = new TryCatchEdge(_current, body, catchBlocks, finallyBlock, end);
 
+            var oldstates0 = _binder.StatesCount;
+
             // build try body
             OpenTryScope(edge);
-            OpenScope(body);
+            OpenScope(body, LocalScope.Try);
             _current = WithNewOrdinal(body);
             VisitElement(x.Body);
             CloseScope();
-            CloeTryScope();
+            CloseTryScope();
             _current = Leave(_current, finallyBlock ?? end);
+
+            var oldstates1 = _binder.StatesCount;
 
             // built catches
             for (int i = 0; i < catchBlocks.Length; i++)
             {
-                _current = WithOpenScope(WithNewOrdinal(catchBlocks[i]));
+                _current = WithOpenScope(WithNewOrdinal(catchBlocks[i]), LocalScope.Catch);
                 VisitElement(x.Catches[i].Body);
                 CloseScope();
                 _current = Leave(_current, finallyBlock ?? end);
             }
 
             // build finally
+            var oldReturnCount = _returnCounter;
             if (finallyBlock != null)
             {
-                _current = WithOpenScope(WithNewOrdinal(finallyBlock));
+                _current = WithOpenScope(WithNewOrdinal(finallyBlock), LocalScope.Finally);
                 VisitElement(x.FinallyItem.Body);
                 CloseScope();
                 _current = Leave(_current, end);
+            }
+
+            //
+            if ((oldstates0 != oldstates1 && finallyBlock != null) ||   // yield in "try" with "finally" block
+                oldstates1 != _binder.StatesCount ||                    // yield in "catch" or "finally"
+                oldReturnCount != _returnCounter)                       // return in "finally"
+            {
+                // catch or finally introduces new states to the state machine
+                // or there is "return" in finally block:
+
+                // catch/finally must not be handled by CLR
+                edge.EmitCatchFinallyOutsideScope = true;
             }
 
             // _current == end
@@ -732,22 +974,16 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
         {
             if (x.LoopType == WhileStmt.Type.Do)
             {
-                var end = NewBlock();
-                var body = NewBlock();
-                OpenBreakScope(end, body);
-                _current = WithOpenScope(Connect(_current, body));
-                // do {
-                VisitElement(x.Body);
-                Connect(_current, body, end, x.CondExpr);
-                // } while (x.CondExpr)
-                CloseScope();
-                CloseBreakScope();
+                Debug.Assert(x.CondExpr != null);
 
-                _current = WithNewOrdinal(end);
+                // do { BODY } while (COND)
+                BuildDoLoop(x.CondExpr, x.Body);
             }
             else if (x.LoopType == WhileStmt.Type.While)
             {
                 Debug.Assert(x.CondExpr != null);
+
+                // while (COND) { BODY }
                 BuildForLoop(null, new List<Expression>(1) { x.CondExpr }, null, x.Body);
             }
         }

@@ -5,6 +5,8 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using System.Collections.Immutable;
+using Pchp.CodeAnalysis.Semantics;
+using Peachpie.CodeAnalysis.Symbols;
 
 namespace Pchp.CodeAnalysis.Symbols
 {
@@ -12,7 +14,32 @@ namespace Pchp.CodeAnalysis.Symbols
     {
         public virtual ImmutableArray<CustomModifier> CustomModifiers => ImmutableArray<CustomModifier>.Empty;
 
+        public virtual ImmutableArray<CustomModifier> RefCustomModifiers => ImmutableArray<CustomModifier>.Empty;
+
         public override SymbolKind Kind => SymbolKind.Parameter;
+
+        /// <summary>
+        /// Optional. Gets the initializer.
+        /// </summary>
+        public virtual BoundExpression Initializer
+        {
+            get
+            {
+                // MAYBE: if (DefaultValueField != null) BoundFieldRef.CreateStaticField(DefaultValueField)
+                var cvalue = ExplicitDefaultConstantValue;
+                return cvalue != null ? new BoundLiteral(cvalue.Value) : null;
+            }
+        }
+
+        /// <summary>
+        /// In case there is a default value that cannot be represented by <see cref="ConstantValue"/>,
+        /// this gets a static readonly field containing the value.
+        /// </summary>
+        /// <remarks>
+        /// In PHP it is possible to set parameter's default value which cannot be represented using <see cref="ConstantValue"/>.
+        /// In such case, the value is set to this runtime field and read if needed.
+        /// </remarks>
+        public virtual FieldSymbol DefaultValueField => null;
 
         public virtual bool IsOptional => false;
 
@@ -31,6 +58,10 @@ namespace Pchp.CodeAnalysis.Symbols
         public override bool IsSealed => true;
 
         public override bool IsExtern => false;
+
+        public virtual bool HasNotNull => false;
+
+        public virtual bool IsPhpRw => false;
 
         /// <summary>
         /// Gets the ordinal position of the parameter. The first parameter has ordinal zero.
@@ -87,12 +118,18 @@ namespace Pchp.CodeAnalysis.Symbols
             get { return null; }
         }
 
+        internal virtual ImportValueAttributeData ImportValueAttributeData => default;
+
+        bool IParameterSymbol.IsDiscard => false;
+
+        NullableAnnotation IParameterSymbol.NullableAnnotation => NullableAnnotation.None;
+
         /// <summary>
         /// Helper method that checks whether this parameter can be passed to anothers method parameter.
         /// </summary>
         internal bool CanBePassedTo(ParameterSymbol another)
         {
-            return another != null && this.Type.IsEqualToOrDerivedFrom(another.Type);
+            return another != null && this.Type.IsOfType(another.Type);
         }
     }
 }

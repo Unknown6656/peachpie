@@ -1,4 +1,5 @@
 ﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.Symbols;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -10,6 +11,7 @@ using Pchp.CodeAnalysis.FlowAnalysis;
 using Pchp.CodeAnalysis.Semantics.Graph;
 using System.Reflection;
 using System.Diagnostics;
+using Devsense.PHP.Syntax;
 
 namespace Pchp.CodeAnalysis.Symbols
 {
@@ -17,7 +19,7 @@ namespace Pchp.CodeAnalysis.Symbols
     /// Represents a method or method-like symbol (including constructor,
     /// destructor, operator, or property/event accessor).
     /// </summary>
-    internal abstract partial class MethodSymbol : Symbol, IMethodSymbol, IPhpRoutineSymbol
+    internal abstract partial class MethodSymbol : Symbol, IMethodSymbol, IMethodSymbolInternal, IPhpRoutineSymbol
     {
         public virtual int Arity => 0;
 
@@ -155,6 +157,8 @@ namespace Pchp.CodeAnalysis.Symbols
 
         ITypeSymbol IMethodSymbol.ReturnType => ReturnType;
 
+        public abstract RefKind RefKind { get; }
+
         public abstract TypeSymbol ReturnType { get; }
 
         public virtual ImmutableArray<CustomModifier> ReturnTypeCustomModifiers => ImmutableArray<CustomModifier>.Empty;
@@ -168,6 +172,12 @@ namespace Pchp.CodeAnalysis.Symbols
         public new virtual MethodSymbol OriginalDefinition => (MethodSymbol)OriginalSymbolDefinition;
 
         ImmutableArray<ITypeParameterSymbol> IMethodSymbol.TypeParameters => StaticCast<ITypeParameterSymbol>.From(this.TypeParameters);
+
+        bool IMethodSymbol.ReturnsByRef => false;
+
+        bool IMethodSymbol.ReturnsByRefReadonly => false;
+
+        ImmutableArray<CustomModifier> IMethodSymbol.RefCustomModifiers => ImmutableArray<CustomModifier>.Empty;
 
         IMethodSymbol IMethodSymbol.Construct(params ITypeSymbol[] typeArguments) => Construct(typeArguments);
 
@@ -251,10 +261,7 @@ namespace Pchp.CodeAnalysis.Symbols
 
         public virtual DllImportData GetDllImportData() => null;
 
-        public ImmutableArray<AttributeData> GetReturnTypeAttributes()
-        {
-            throw new NotImplementedException();
-        }
+        public virtual ImmutableArray<AttributeData> GetReturnTypeAttributes() => ImmutableArray<AttributeData>.Empty;
 
         public virtual ITypeSymbol GetTypeInferredDuringReduction(ITypeParameterSymbol reducedFromTypeParameter)
         {
@@ -266,17 +273,30 @@ namespace Pchp.CodeAnalysis.Symbols
             throw new NotImplementedException();
         }
 
-        #region IPhpRoutineSymbol
-
-        public virtual bool CastToFalse
+        IMethodSymbol IMethodSymbol.Construct(ImmutableArray<ITypeSymbol> typeArguments, ImmutableArray<NullableAnnotation> typeArgumentNullableAnnotations)
         {
-            get
+            if (typeArgumentNullableAnnotations.All(annotation => annotation != NullableAnnotation.Annotated))
             {
-                // applies only if return type is int, long, double or a reference type
-                //return this.GetReturnTypeAttributes().Any(a => a.AttributeClass.MetadataName == "Pchp.Core.CastToFalse"); // TODO
-                return false;
+                return this.Construct(typeArguments.CastArray<TypeSymbol>());
+            }
+            else
+            {
+                throw new NotImplementedException(); 
             }
         }
+
+        /// <summary>
+        /// Gets value indicating the method is annotated with [PhpHiddenAttribute] metadata.
+        /// </summary>
+        public virtual bool IsPhpHidden => false;
+
+        #region IPhpRoutineSymbol
+
+        public virtual bool CastToFalse => false;
+
+        public virtual bool IsInitFieldsOnly => false;
+
+        public virtual bool HasNotNull => false;
 
         /// <summary>
         /// For source routines, gets their control flow graph.
@@ -287,7 +307,39 @@ namespace Pchp.CodeAnalysis.Symbols
         /// <summary>
         /// Gets the routine name, equivalent to a PHP pseudoconstant <c>__FUNCTION__</c>.
         /// </summary>
-        public virtual string RoutineName => Name;
+        public virtual string RoutineName => Name; // TODO: "Name" struct with correct comparer
+
+        /// <summary>
+        /// Whether routine represents a global code.
+        /// </summary>
+        public virtual bool IsGlobalScope => false;
+
+        public BoundExpression Initializer => null; // not applicable for methods
+
+        NullableAnnotation IMethodSymbol.ReturnNullableAnnotation => NullableAnnotation.None;
+
+        ImmutableArray<NullableAnnotation> IMethodSymbol.TypeArgumentNullableAnnotations => TypeArguments.SelectAsArray(a => NullableAnnotation.None);
+
+        bool IMethodSymbol.IsReadOnly => false;
+
+        bool IMethodSymbol.IsInitOnly => false;
+
+        NullableAnnotation IMethodSymbol.ReceiverNullableAnnotation => NullableAnnotation.None;
+
+        bool IMethodSymbol.IsConditional => throw new NotImplementedException();
+
+        #endregion
+
+        #region IMethodSymbolInternal
+
+        int IMethodSymbolInternal.CalculateLocalSyntaxOffset(int declaratorPosition, SyntaxTree declaratorTree)
+        {
+            throw new NotImplementedException();
+        }
+
+        IMethodSymbolInternal IMethodSymbolInternal.Construct(params ITypeSymbolInternal[] typeArguments) => Construct(typeArguments.CastToArray<ITypeSymbol>());
+
+        bool IMethodSymbolInternal.IsIterator => false;     // Peachpie produces only PHP generators, which is of a different type.
 
         #endregion
     }

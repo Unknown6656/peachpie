@@ -1,131 +1,69 @@
-﻿using Microsoft.CodeAnalysis;
-using Pchp.CodeAnalysis.FlowAnalysis;
-using Pchp.CodeAnalysis.Symbols;
-using Pchp.Core;
-using System;
-using System.Collections.Generic;
+﻿using System;
+using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using Devsense.PHP.Syntax;
+using Microsoft.CodeAnalysis;
+using Pchp.CodeAnalysis.FlowAnalysis;
+using Pchp.CodeAnalysis.Semantics;
+using Pchp.CodeAnalysis.Symbols;
+using AST = Devsense.PHP.Syntax.Ast;
 
 namespace Pchp.CodeAnalysis
 {
     internal static partial class TypeRefFactory
     {
-        #region Primitive Types
-
-        internal static readonly PrimitiveTypeRef/*!*/BoolTypeRef = new PrimitiveTypeRef(PhpTypeCode.Boolean);
-        internal static readonly PrimitiveTypeRef/*!*/LongTypeRef = new PrimitiveTypeRef(PhpTypeCode.Long);
-        internal static readonly PrimitiveTypeRef/*!*/DoubleTypeRef = new PrimitiveTypeRef(PhpTypeCode.Double);
-        internal static readonly PrimitiveTypeRef/*!*/StringTypeRef = new PrimitiveTypeRef(PhpTypeCode.String);
-        internal static readonly PrimitiveTypeRef/*!*/WritableStringRef = new PrimitiveTypeRef(PhpTypeCode.WritableString);
-        internal static readonly PrimitiveTypeRef/*!*/ArrayTypeRef = new PrimitiveTypeRef(PhpTypeCode.PhpArray);
-        internal static readonly PrimitiveTypeRef/*!*/CallableTypeRef = new PrimitiveTypeRef(PhpTypeCode.Callable);
-
-        #endregion
-
-        /// <summary>
-        /// Converts CLR type symbol to TypeRef used by flow analysis.
-        /// </summary>
-        public static ITypeRef CreateTypeRef(TypeRefContext ctx, TypeSymbol t)
+        public static TypeRefMask CreateMask(TypeRefContext ctx, TypeSymbol t, bool notNull = false)
         {
-            Contract.ThrowIfNull(t);
-
-            switch (t.SpecialType)
-            {
-                case SpecialType.System_Void: throw new ArgumentException();
-                case SpecialType.System_Int32:
-                case SpecialType.System_Int64: return LongTypeRef;
-                case SpecialType.System_String: return StringTypeRef;
-                case SpecialType.System_Double: return DoubleTypeRef;
-                case SpecialType.System_Boolean: return BoolTypeRef;
-                case SpecialType.System_Object: return new ClassTypeRef(NameUtils.SpecialNames.System_Object);
-                case SpecialType.System_DateTime: return new ClassTypeRef(new QualifiedName(new Name("DateTime"), new[] { new Name("System") }));
-                default:
-                    if (t is NamedTypeSymbol)
-                    {
-                        return new ClassTypeRef(((NamedTypeSymbol)t).MakeQualifiedName());
-                    }
-                    else if (t is ArrayTypeSymbol)
-                    {
-                        var arr = (ArrayTypeSymbol)t;
-                        if (!arr.IsSZArray)
-                        {
-                            throw new NotImplementedException();
-                        }
-
-                        return new ArrayTypeRef(null, CreateMask(ctx, arr.ElementType));
-                    }
-                    else
-                    {
-                        throw Roslyn.Utilities.ExceptionUtilities.UnexpectedValue(t);
-                    }
-            }
-        }
-
-        public static ITypeRef Create(ConstantValue c)
-        {
-            Contract.ThrowIfNull(c);
-
-            switch (c.SpecialType)
-            {
-                case SpecialType.System_Int32:
-                case SpecialType.System_Int64: return LongTypeRef;
-                case SpecialType.System_String: return StringTypeRef;
-                case SpecialType.System_Double: return DoubleTypeRef;
-                case SpecialType.System_Boolean: return BoolTypeRef;
-                default:
-                    throw new NotImplementedException();
-            }
-        }
-
-        public static TypeRefMask CreateMask(TypeRefContext ctx, TypeSymbol t)
-        {
-            Contract.ThrowIfNull(t);
+            // shortcuts:
+            if (t.IsNullableType(out var ttype)) return CreateMask(ctx, ttype, notNull: true) | ctx.GetNullTypeMask();
 
             switch (t.SpecialType)
             {
                 case SpecialType.System_Void: return 0;
-                case SpecialType.System_Int64: return ctx.GetLongTypeMask();
-                case SpecialType.System_String: return ctx.GetStringTypeMask();
-                case SpecialType.System_Double: return ctx.GetDoubleTypeMask();
                 case SpecialType.System_Boolean: return ctx.GetBooleanTypeMask();
-                case SpecialType.None:
-                    var containing = t.ContainingAssembly;
-                    if (containing != null && containing.IsPchpCorLibrary)
+                case SpecialType.System_Int64: return ctx.GetLongTypeMask();
+                case SpecialType.System_Double: return ctx.GetDoubleTypeMask();
+                case SpecialType.System_String: return ctx.GetStringTypeMask() | (notNull ? 0 : ctx.GetNullTypeMask());
+                case SpecialType.System_Object: return ctx.GetSystemObjectTypeMask() | (notNull ? 0 : ctx.GetNullTypeMask());
+                default:
+
+                    TypeRefMask mask;
+
+                    if (t.Is_PhpValue())
                     {
-                        if (t.Name == "PhpValue") return TypeRefMask.AnyType;
-                        if (t.Name == "PhpAlias") return TypeRefMask.AnyType.WithRefFlag;
-                        if (t.Name == "PhpNumber") return ctx.GetNumberTypeMask();
-                        if (t.Name == "PhpString") return ctx.GetWritableStringTypeMask();
-                        if (t.Name == "PhpArray") return ctx.GetArrayTypeMask();
-                        if (t.Name == "IPhpCallable") return ctx.GetCallableTypeMask();
+                        return TypeRefMask.AnyType;
+                    }
+                    else if (t.Is_PhpAlias())
+                    {
+                        return TypeRefMask.AnyType.WithRefFlag;
+                    }
+                    else if (t.Is_PhpArray())
+                    {
+                        mask = ctx.GetArrayTypeMask();
+                    }
+                    else if (t.Is_PhpString())
+                    {
+                        mask = ctx.GetWritableStringTypeMask();
+                    }
+                    else if (t.Is_PhpResource())
+                    {
+                        mask = ctx.GetResourceTypeMask();
+                    }
+                    else
+                    {
+                        mask = ctx.BoundTypeRefFactory.Create(t).GetTypeRefMask(ctx);
                     }
 
-                    break;
+                    if (!notNull && t.CanBeAssignedNull())
+                    {
+                        mask |= ctx.GetNullTypeMask();
+                    }
+
+                    return mask;
             }
-
-            return CreateMask(ctx, CreateTypeRef(ctx, t));
         }
-
-        public static TypeRefMask CreateMask(TypeRefContext ctx, ITypeRef tref)
-        {
-            Contract.ThrowIfNull(tref);
-
-            TypeRefMask result = 0;
-
-            result.AddType(ctx.AddToContext(tref));
-
-            if (!tref.IsPrimitiveType && !tref.IsArray)
-            {
-                result.IncludesSubclasses = true;
-            }
-
-            return result;
-        }
-
+        
         /// <summary>
         /// Creates type context for a method within given type, determines naming, type context.
         /// </summary>
@@ -133,8 +71,10 @@ namespace Pchp.CodeAnalysis
         {
             Contract.ThrowIfNull(containingType);
 
-            var typeDecl = containingType.Syntax;
-            return new TypeRefContext(typeDecl.ContainingSourceUnit, containingType);
+            return new TypeRefContext(
+                containingType.DeclaringCompilation,
+                containingType, // scope
+                thisType: containingType.IsTrait ? null : containingType);
         }
     }
 }

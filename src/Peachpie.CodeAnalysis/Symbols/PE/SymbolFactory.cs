@@ -1,4 +1,5 @@
-﻿using Microsoft.CodeAnalysis;
+﻿using Microsoft.Cci;
+using Microsoft.CodeAnalysis;
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
@@ -25,12 +26,6 @@ namespace Pchp.CodeAnalysis.Symbols
             return ArrayTypeSymbol.CreateMDArray(moduleSymbol.ContainingAssembly, elementType, rank, sizes, lowerBounds, CSharpCustomModifier.Convert(customModifiers));
         }
 
-        internal override TypeSymbol GetByRefReturnTypeSymbol(PEModuleSymbol moduleSymbol, TypeSymbol referencedType, ushort countOfCustomModifiersPrecedingByRef)
-        {
-            throw new NotImplementedException();
-            //return new ByRefReturnErrorTypeSymbol(referencedType, countOfCustomModifiersPrecedingByRef);
-        }
-
         internal override TypeSymbol GetSpecialType(PEModuleSymbol moduleSymbol, SpecialType specialType)
         {
             return moduleSymbol.ContainingAssembly.GetSpecialType(specialType);
@@ -38,8 +33,7 @@ namespace Pchp.CodeAnalysis.Symbols
 
         internal override TypeSymbol GetSystemTypeSymbol(PEModuleSymbol moduleSymbol)
         {
-            throw new NotImplementedException();
-            //return moduleSymbol.SystemTypeSymbol;
+            return moduleSymbol.SystemTypeSymbol;
         }
 
         internal override TypeSymbol MakePointerTypeSymbol(PEModuleSymbol moduleSymbol, TypeSymbol type, ImmutableArray<ModifierInfo<TypeSymbol>> customModifiers)
@@ -49,24 +43,22 @@ namespace Pchp.CodeAnalysis.Symbols
                 return type;
             }
 
+            return new PointerTypeSymbol(type, CSharpCustomModifier.Convert(customModifiers));
+        }
+
+        internal override TypeSymbol MakeFunctionPointerTypeSymbol(CallingConvention callingConvention, ImmutableArray<ParamInfo<TypeSymbol>> returnAndParamTypes)
+        {
             throw new NotImplementedException();
-            //return new PointerTypeSymbol(type, CSharpCustomModifier.Convert(customModifiers));
         }
 
         internal override TypeSymbol GetEnumUnderlyingType(PEModuleSymbol moduleSymbol, TypeSymbol type)
         {
-            throw new NotImplementedException();
-            //return type.GetEnumUnderlyingType();
+            return type.GetEnumUnderlyingType();
         }
 
         internal override Cci.PrimitiveTypeCode GetPrimitiveTypeCode(PEModuleSymbol moduleSymbol, TypeSymbol type)
         {
             return type.PrimitiveTypeCode;            
-        }
-
-        internal override bool IsVolatileModifierType(PEModuleSymbol moduleSymbol, TypeSymbol type)
-        {
-            return type.SpecialType == SpecialType.System_Runtime_CompilerServices_IsVolatile;
         }
 
         internal override TypeSymbol GetSZArrayTypeSymbol(PEModuleSymbol moduleSymbol, TypeSymbol elementType, ImmutableArray<ModifierInfo<TypeSymbol>> customModifiers)

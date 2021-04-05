@@ -8,6 +8,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using Roslyn.Utilities;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.PooledObjects;
 
 namespace Pchp.CodeAnalysis.Symbols
 {
@@ -17,8 +18,6 @@ namespace Pchp.CodeAnalysis.Symbols
     /// </summary>
     internal abstract class SubstitutedNamedTypeSymbol : NamedTypeSymbol
     {
-        private static readonly Func<Symbol, NamedTypeSymbol, Symbol> s_symbolAsMemberFunc = SymbolExtensions.SymbolAsMember;
-
         private readonly bool _unbound;
         private readonly NamedTypeSymbol _originalDefinition;
         private readonly TypeMap _inputMap;
@@ -191,6 +190,8 @@ namespace Pchp.CodeAnalysis.Symbols
             }
         }
 
+        public sealed override bool IsSerializable => _originalDefinition.IsSerializable;
+
         public override NamedTypeSymbol BaseType
         {
             get
@@ -299,6 +300,29 @@ namespace Pchp.CodeAnalysis.Symbols
             return _originalDefinition.GetTypeMembers(name, arity).SelectAsArray((t, self) => t.AsMember(self), this);
         }
 
+        public override ImmutableArray<MethodSymbol> InstanceConstructors
+        {
+            get
+            {
+                if (_unbound)
+                {
+                    return ImmutableArray<MethodSymbol>.Empty;
+                }
+                else
+                {
+                    var originalctors = _originalDefinition.InstanceConstructors;
+                    var result = new MethodSymbol[originalctors.Length];
+
+                    for (int i = 0; i < result.Length; i++)
+                    {
+                        result[i] = originalctors[i].AsMember(this);
+                    }
+
+                    return result.AsImmutable();
+                }
+            }
+        }
+
         public sealed override ImmutableArray<Symbol> GetMembers()
         {
             var builder = ArrayBuilder<Symbol>.GetInstance();
@@ -388,6 +412,17 @@ namespace Pchp.CodeAnalysis.Symbols
 
             cache.TryAdd(name, substitutedMembers);
             return substitutedMembers;
+        }
+
+        public override ImmutableArray<Symbol> GetMembersByPhpName(string name)
+        {
+            var originalMembers = _originalDefinition.GetMembersByPhpName(name);
+            if (originalMembers.IsDefaultOrEmpty)
+            {
+                return originalMembers;
+            }
+
+            return originalMembers.Select(t => t.SymbolAsMember(this)).AsImmutable();
         }
 
         internal override IEnumerable<IFieldSymbol> GetFieldsToEmit()

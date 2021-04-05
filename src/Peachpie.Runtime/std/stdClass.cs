@@ -1,17 +1,14 @@
-﻿using Pchp.Core;
-using Pchp.Core.Dynamic;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Runtime.CompilerServices;
-using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
+﻿using System.Runtime.CompilerServices;
+using System.ComponentModel;
+using Pchp.Core;
+using System.Diagnostics;
 
 /// <summary>
 /// Generic empty class.
 /// Used for casting values to an <c>object</c>.
 /// </summary>
+[EditorBrowsable(EditorBrowsableState.Advanced)]
+[PhpType(PhpTypeAttribute.InheritName), PhpExtension("Core")]
 public class stdClass
 {
     /// <summary>
@@ -21,6 +18,7 @@ public class stdClass
     /// The field is recognized by runtime and is not intended for direct use.
     /// </remarks>
     [CompilerGenerated]
+    [DebuggerBrowsable(DebuggerBrowsableState.RootHidden)]
     internal PhpArray __peach__runtimeFields;
 
     /// <summary>

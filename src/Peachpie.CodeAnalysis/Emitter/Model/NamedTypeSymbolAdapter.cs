@@ -8,6 +8,7 @@ using Roslyn.Utilities;
 using Cci = Microsoft.Cci;
 using Pchp.CodeAnalysis.Emit;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.PooledObjects;
 using System.Linq;
 
 namespace Pchp.CodeAnalysis.Symbols
@@ -41,31 +42,32 @@ namespace Pchp.CodeAnalysis.Symbols
             return AsTypeDefinitionImpl(moduleBeingBuilt);
         }
 
-        Cci.PrimitiveTypeCode Cci.ITypeReference.TypeCode(EmitContext context)
+        Cci.PrimitiveTypeCode Cci.ITypeReference.TypeCode
         {
-            Debug.Assert(this.IsDefinitionOrDistinct());
-
-            if (this.IsDefinition)
+            get
             {
-                return this.PrimitiveTypeCode;
-            }
+                Debug.Assert(this.IsDefinitionOrDistinct());
 
-            return Cci.PrimitiveTypeCode.NotPrimitive;
+                if (this.IsDefinition)
+                {
+                    return this.PrimitiveTypeCode;
+                }
+
+                return Cci.PrimitiveTypeCode.NotPrimitive;
+            }
         }
 
         TypeDefinitionHandle Cci.ITypeReference.TypeDef
         {
             get
             {
-                //PENamedTypeSymbol peNamedType = this as PENamedTypeSymbol;
-                //if ((object)peNamedType != null)
-                //{
-                //    return peNamedType.Handle;
-                //}
+                var peNamedType = this as PENamedTypeSymbol;
+                if ((object)peNamedType != null)
+                {
+                    return peNamedType.Handle;
+                }
 
-                throw new System.NotImplementedException();
-
-                //return default(TypeDefinitionHandle);
+                return default(TypeDefinitionHandle);
             }
         }
 
@@ -233,13 +235,10 @@ namespace Pchp.CodeAnalysis.Symbols
                 : null;
         }
 
-        IEnumerable<Cci.IEventDefinition> Cci.ITypeDefinition.Events
+        IEnumerable<Cci.IEventDefinition> Cci.ITypeDefinition.GetEvents(EmitContext context)
         {
-            get
-            {
-                CheckDefinitionInvariant();
-                return GetEventsToEmit().Cast<Cci.IEventDefinition>();
-            }
+            CheckDefinitionInvariant();
+            return GetEventsToEmit().Cast<Cci.IEventDefinition>();
         }
 
         internal virtual IEnumerable<IEventSymbol> GetEventsToEmit()
@@ -360,7 +359,7 @@ namespace Pchp.CodeAnalysis.Symbols
             get { return (ushort)this.Arity; }
         }
 
-        IEnumerable<Cci.ITypeReference> Cci.ITypeDefinition.Interfaces(EmitContext context)
+        IEnumerable<Cci.TypeReferenceWithAttributes> Cci.ITypeDefinition.Interfaces(EmitContext context)
         {
             Debug.Assert(((Cci.ITypeReference)this).AsTypeDefinition(context) != null);
 
@@ -368,8 +367,9 @@ namespace Pchp.CodeAnalysis.Symbols
 
             foreach (NamedTypeSymbol iiface in this.GetInterfacesToEmit())
             {
-                yield return moduleBeingBuilt.Translate(iiface, null, context.Diagnostics,
+                var typeRef = moduleBeingBuilt.Translate(iiface, null, context.Diagnostics,
                     fromImplements: true);
+                yield return new Cci.TypeReferenceWithAttributes(typeRef);
             }
 
             yield break;
@@ -445,19 +445,18 @@ namespace Pchp.CodeAnalysis.Symbols
                 {
                     case TypeKind.Enum:
                     case TypeKind.Delegate:
-                    //C# interfaces don't have fields so the flag doesn't really matter, but Dev10 omits it
-                    case TypeKind.Interface:
                         return false;
                 }
 
-                //apply the beforefieldinit attribute unless there is an explicitly specified static constructor
-                foreach (var member in GetMembers(WellKnownMemberNames.StaticConstructorName))
-                {
-                    if (!member.IsImplicitlyDeclared)
-                    {
-                        return false;
-                    }
-                }
+                // PHP does not have exlicit static constructors:
+                ////apply the beforefieldinit attribute unless there is an explicitly specified static constructor
+                //foreach (var member in GetMembers(WellKnownMemberNames.StaticConstructorName))
+                //{
+                //    if (!member.IsImplicitlyDeclared)
+                //    {
+                //        return false;
+                //    }
+                //}
 
                 return true;
             }
@@ -535,6 +534,8 @@ namespace Pchp.CodeAnalysis.Symbols
             }
         }
 
+        bool Cci.ITypeDefinition.IsDelegate => this.TypeKind == TypeKind.Delegate;
+
         internal virtual bool IsMetadataSealed
         {
             get
@@ -554,13 +555,9 @@ namespace Pchp.CodeAnalysis.Symbols
                 yield return (Cci.IMethodDefinition)method;
             }
 
-            var generated = ((PEModuleBuilder)context.Module).GetSynthesizedMethods(this);
-            if (generated != null)
+            foreach (var m in ((PEModuleBuilder)context.Module).GetSynthesizedMethods(this))
             {
-                foreach (var m in generated)
-                {
-                    yield return m;
-                }
+                yield return m;
             }
         }
 
@@ -623,15 +620,15 @@ namespace Pchp.CodeAnalysis.Symbols
                 yield return (Cci.IPropertyDefinition)property;
             }
 
-            //IEnumerable<Cci.IPropertyDefinition> generated = ((PEModuleBuilder)context.Module).GetSynthesizedProperties(this);
+            IEnumerable<Cci.IPropertyDefinition> generated = ((PEModuleBuilder)context.Module).GetSynthesizedProperties(this);
 
-            //if (generated != null)
-            //{
-            //    foreach (var m in generated)
-            //    {
-            //        yield return m;
-            //    }
-            //}
+            if (generated != null)
+            {
+                foreach (var p in generated)
+                {
+                    yield return p;
+                }
+            }
         }
 
         internal virtual IEnumerable<IPropertySymbol> GetPropertiesToEmit()
@@ -720,7 +717,18 @@ namespace Pchp.CodeAnalysis.Symbols
         {
             get
             {
-                string unsuffixedName = this.MetadataName;
+                string unsuffixedName = this.Name;
+
+                if (this is SourceTypeSymbol srct)
+                {
+                    // We're using SourceTypeSymbol.MetadataName as Name (because changing the Name would cause too much refactoring for now);
+                    // In PHP we can have more classes with the same name in the same namespace,
+                    // so the compiler (SourceTypeSymbol) generates different MetadataName for it.
+                    unsuffixedName = srct.MetadataName;
+
+                    // remove suffix from metadata, wil be added by emitter
+                    unsuffixedName = MetadataHelpers.InferTypeArityAndUnmangleMetadataName(unsuffixedName, out _);
+                }
 
                 // CLR generally allows names with dots, however some APIs like IMetaDataImport
                 // can only return full type names combined with namespaces. 
@@ -783,10 +791,9 @@ namespace Pchp.CodeAnalysis.Symbols
 
             if (!this.IsDefinition)
             {
-                throw new System.NotImplementedException();
-                //return moduleBeingBuilt.Translate(this.ContainingType,
-                //                                  syntaxNodeOpt: (CSharpSyntaxNode)context.SyntaxNodeOpt,
-                //                                  diagnostics: context.Diagnostics);
+                return moduleBeingBuilt.Translate(this.ContainingType,
+                                                  syntaxNodeOpt: context.SyntaxNodeOpt,
+                                                  diagnostics: context.Diagnostics);
             }
 
             return (Cci.ITypeReference)this.ContainingType;
@@ -844,13 +851,10 @@ namespace Pchp.CodeAnalysis.Symbols
             return builder.ToImmutableAndFree();
         }
 
-        Cci.INamedTypeReference Cci.IGenericTypeInstanceReference.GenericType
+        Cci.INamedTypeReference Cci.IGenericTypeInstanceReference.GetGenericType(EmitContext context)
         {
-            get
-            {
-                Debug.Assert(((Cci.ITypeReference)this).AsGenericTypeInstanceReference != null);
-                return GenericTypeImpl;
-            }
+            Debug.Assert(((Cci.ITypeReference)this).AsGenericTypeInstanceReference != null);
+            return GenericTypeImpl;
         }
 
         private Cci.INamedTypeReference GenericTypeImpl
@@ -861,18 +865,15 @@ namespace Pchp.CodeAnalysis.Symbols
             }
         }
 
-        Cci.INestedTypeReference Cci.ISpecializedNestedTypeReference.UnspecializedVersion
+        Cci.INestedTypeReference Cci.ISpecializedNestedTypeReference.GetUnspecializedVersion(EmitContext context)
         {
-            get
-            {
-                Debug.Assert(((Cci.ITypeReference)this).AsSpecializedNestedTypeReference != null);
-                var result = GenericTypeImpl.AsNestedTypeReference;
+            Debug.Assert(((Cci.ITypeReference)this).AsSpecializedNestedTypeReference != null);
+            var result = GenericTypeImpl.AsNestedTypeReference;
 
-                Debug.Assert(result != null);
-                return result;
-            }
+            Debug.Assert(result != null);
+            return result;
         }
 
-        public IEnumerable<TypeSymbol> TypeArgumentsNoUseSiteDiagnostics => TypeArguments;
+        public ImmutableArray<TypeSymbol> TypeArgumentsNoUseSiteDiagnostics => TypeArguments;
     }
 }

@@ -1,26 +1,17 @@
-﻿using Microsoft.CodeAnalysis;
-using Pchp.Core;
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+using Microsoft.CodeAnalysis;
 
 namespace Pchp.CodeAnalysis.Symbols
 {
     /// <summary>
     /// Descriptor of a well-known type.
     /// </summary>
-    [DebuggerDisplay("CoreType {FullName,nq}")]
+    [DebuggerDisplay("CoreType {FullName}")]
     sealed class CoreType : IEquatable<CoreType>, IEquatable<TypeSymbol>
     {
-        internal CoreMethod Method(string name, params CoreType[] ptypes) => new CoreMethod(this, name, ptypes);
-        internal CoreProperty Property(string name) => new CoreProperty(this, name);
-        internal CoreField Field(string name) => new CoreField(this, name);
-        internal CoreOperator Operator(string name, params CoreType[] ptypes) => new CoreOperator(this, name, ptypes);
-        internal CoreConstructor Ctor(params CoreType[] ptypes) => new CoreConstructor(this, ptypes);
-
         /// <summary>
         /// Gets full type name.
         /// </summary>
@@ -80,6 +71,16 @@ namespace Pchp.CodeAnalysis.Symbols
         #endregion
     }
 
+    static class CoreTypeExtensions
+    {
+        public static CoreMethod Method(this CoreType type, string name, params CoreType[] ptypes) => new CoreMethod(type, name, ptypes);
+        public static CoreProperty Property(this CoreType type, string name) => new CoreProperty(type, name);
+        public static CoreField Field(this CoreType type, string name) => new CoreField(type, name);
+        public static CoreOperator Operator(this CoreType type, string name, params CoreType[] ptypes) => new CoreOperator(type, name, ptypes);
+        public static CoreConstructor Ctor(this CoreType type, params CoreType[] ptypes) => new CoreConstructor(type, ptypes);
+        public static CoreCast CastImplicit(this CoreType type, CoreType target) => new CoreCast(type, target, false);
+    }
+
     /// <summary>
     /// Set of well-known types declared in core libraries.
     /// </summary>
@@ -88,21 +89,70 @@ namespace Pchp.CodeAnalysis.Symbols
         readonly PhpCompilation _compilation;
 
         /// <summary>
+        /// Root namespace for Peachpie Runtime types.
+        /// </summary>
+        public const string PeachpieRuntimeNamespace = "Pchp.Core";
+
+        /// <summary>
         /// Name of attribute class representing an extension library.
         /// </summary>
-        public const string PhpExtensionAttributeName = "Pchp.Core.PhpExtensionAttribute";
+        public const string PhpExtensionAttributeFullName = PeachpieRuntimeNamespace + ".PhpExtensionAttribute";
+
+        /// <summary>
+        /// Name of attribute class representing a PHP type descriptor.
+        /// </summary>
+        public const string PhpTypeAttributeFullName = PeachpieRuntimeNamespace + ".PhpTypeAttribute";
+
+        /// <summary>
+        /// Name of attribute class representing a script type.
+        /// </summary>
+        public const string PhpScriptAttributeFullName = PeachpieRuntimeNamespace + ".ScriptAttribute";
+
+        /// <summary>
+        /// Name of attribute class representing a PHAR archive script type.
+        /// </summary>
+        public const string PharAttributeFullName = PeachpieRuntimeNamespace + ".PharAttribute";
+
+        /// <summary>
+        /// Name of attribute class representing target PHP language specification.
+        /// </summary>
+        public const string TargetPhpLanguageAttributeFullName = PeachpieRuntimeNamespace + ".TargetPhpLanguageAttribute";
+
+        /// <summary>
+        /// Full name of Context+DllLoader&lt;&gt;.
+        /// </summary>
+        public const string Context_DllLoader_T = PeachpieRuntimeNamespace + ".Context+DllLoader`1";
+
+        /// <summary>
+        /// Name of attribute class annotating trait declaration.
+        /// </summary>
+        public const string PhpTraitAttributeName = "PhpTraitAttribute";
+
+        /// <summary>
+        /// Name of <c>PhpFieldsOnlyCtorAttribute</c> class.
+        /// </summary>
+        public const string PhpFieldsOnlyCtorAttributeName = "PhpFieldsOnlyCtorAttribute";
+
+        /// <summary>
+        /// Name of <c>PhpTraitMemberVisibilityAttribute</c> class.
+        /// </summary>
+        public const string PhpMemberVisibilityAttributeName = "PhpMemberVisibilityAttribute";
 
         public readonly CoreType
-            Context, Operators, Convert, Comparison, StrictComparison,
-            ScriptAttribute, ScriptDiedException,
-            IStaticInit, RoutineInfo,
-            CallBinderFactory, GetFieldBinder, SetFieldBinder, AccessFlags,
-            PhpTypeInfoExtension, PhpTypeInfo,
-            PhpNumber, PhpValue, PhpAlias, PhpString, PhpArray, PhpResource, IPhpArray, IPhpEnumerable, IPhpCallable,
-            IntStringKey,
-            Void, Object, Int32, Long, Double, Boolean, String, Exception,
+            Context, Operators, Convert, StrictConvert, Comparison, StrictComparison, PhpException, PhpCallableToDelegate,
+            ScriptAttribute, PhpTraitAttribute, PharAttribute, PhpTypeAttribute, PhpHiddenAttribute, PhpFieldsOnlyCtorAttribute, DefaultValueAttribute, PhpMemberVisibilityAttribute, PhpStaticLocalAttribute, PhpCustomAtribute,
+            NullableAttribute, NullableContextAttribute,
+            ScriptDiedException,
+            IStaticInit, RoutineInfo, IndirectLocal,
+            BinderFactory, GetClassConstBinder, GetFieldBinder, SetFieldBinder, AccessMask,
+            Dynamic_NameParam_T, Dynamic_TargetTypeParam, Dynamic_LateStaticTypeParam, Dynamic_CallerTypeParam, Dynamic_UnpackingParam_T,
+            RuntimeChain_ChainEnd, RuntimeChain_Value_T, RuntimeChain_Property_T, RuntimeChain_ArrayItem_T, RuntimeChain_ArrayNewItem_T,
+            PhpTypeInfoExtension, PhpTypeInfo, CommonPhpArrayKeys,
+            PhpNumber, PhpValue, PhpAlias, PhpString, PhpArray, PhpResource, IPhpArray, IPhpEnumerable, IPhpCallable, IPhpConvertible, PhpString_Blob,
+            IntStringKey, PhpHashtable, ImportValueAttribute, DummyFieldsOnlyCtor,
+            Void, Object, Byte, Int32, Long, Double, Boolean, String, Exception,
             RuntimeTypeHandle, RuntimeMethodHandle,
-            stdClass;
+            stdClass, ArrayAccess, Closure, Generator, Iterator, Traversable, Stringable, GeneratorStateMachineDelegate, MainDelegate, IntPtr;
 
         public CoreTypes(PhpCompilation compilation)
         {
@@ -112,6 +162,7 @@ namespace Pchp.CodeAnalysis.Symbols
 
             Void = Create(SpecialType.System_Void);
             Object = Create(SpecialType.System_Object);
+            Byte = Create(SpecialType.System_Byte);
             Int32 = Create(SpecialType.System_Int32);
             Long = Create(SpecialType.System_Int64);
             Double = Create(SpecialType.System_Double);
@@ -130,34 +181,78 @@ namespace Pchp.CodeAnalysis.Symbols
             IPhpArray = Create("IPhpArray");
             IPhpEnumerable = Create("IPhpEnumerable");
             IPhpCallable = Create("IPhpCallable");
+            IPhpConvertible = Create("IPhpConvertible");
+            PhpString_Blob = Create("PhpString+Blob");
             IntStringKey = Create("IntStringKey");
+            PhpHashtable = Create("PhpHashtable");
             ScriptDiedException = Create("ScriptDiedException");
             Context = Create("Context");
             Operators = Create("Operators");
             Comparison = Create("Comparison");
             StrictComparison = Create("StrictComparison");
             Convert = Create("Convert");
+            StrictConvert = Create("StrictConvert");
+            PhpException = Create("PhpException");
+            PhpCallableToDelegate = Create("PhpCallableToDelegate`1"); // Arity 1
             ScriptAttribute = Create("ScriptAttribute");
+            PhpTraitAttribute = Create(PhpTraitAttributeName);
+            PharAttribute = Create("PharAttribute");
+            PhpTypeAttribute = Create("PhpTypeAttribute");
+            PhpHiddenAttribute = Create("PhpHiddenAttribute");
+            ImportValueAttribute = Create("ImportValueAttribute");
+            DummyFieldsOnlyCtor = Create("DummyFieldsOnlyCtor");
+            PhpFieldsOnlyCtorAttribute = Create(PhpFieldsOnlyCtorAttributeName);
+            DefaultValueAttribute = Create("DefaultValueAttribute");
+            PhpCustomAtribute = Create(nameof(PhpCustomAtribute));
+            PhpMemberVisibilityAttribute = Create(PhpMemberVisibilityAttributeName);
+            NullableAttribute = CreateFromFullName("System.Runtime.CompilerServices.NullableAttribute");
+            NullableContextAttribute = CreateFromFullName("System.Runtime.CompilerServices.NullableContextAttribute");
             IStaticInit = Create("IStaticInit");
             RoutineInfo = Create("Reflection.RoutineInfo");
+            IndirectLocal = Create("IndirectLocal");
             stdClass = CreateFromFullName("stdClass");
+            ArrayAccess = CreateFromFullName("ArrayAccess");
+            Closure = CreateFromFullName("Closure");
 
-            CallBinderFactory = Create("Dynamic.CallBinderFactory");
+            BinderFactory = Create("Dynamic.BinderFactory");
+            GetClassConstBinder = Create("Dynamic.GetClassConstBinder");
             GetFieldBinder = Create("Dynamic.GetFieldBinder");
             SetFieldBinder = Create("Dynamic.SetFieldBinder");
-            AccessFlags = Create("Dynamic.AccessFlags");
+            AccessMask = CreateFromFullName("Pchp.CodeAnalysis.Semantics.AccessMask");
+
+            Dynamic_NameParam_T = Create("Dynamic.NameParam`1");
+            Dynamic_TargetTypeParam = Create("Dynamic.TargetTypeParam");
+            Dynamic_LateStaticTypeParam = Create("Dynamic.LateStaticTypeParam");
+            Dynamic_CallerTypeParam = Create("Dynamic.CallerTypeParam");
+            Dynamic_UnpackingParam_T = Create("Dynamic.UnpackingParam`1");
+
+            RuntimeChain_ChainEnd = Create("Dynamic.RuntimeChain.ChainEnd");
+            RuntimeChain_Value_T = Create("Dynamic.RuntimeChain.Value`1");
+            RuntimeChain_Property_T = Create("Dynamic.RuntimeChain.Property`1");
+            RuntimeChain_ArrayItem_T = Create("Dynamic.RuntimeChain.ArrayItem`1");
+            RuntimeChain_ArrayNewItem_T = Create("Dynamic.RuntimeChain.ArrayNewItem`1");
 
             PhpTypeInfoExtension = Create("Reflection.PhpTypeInfoExtension");
             PhpTypeInfo = Create("Reflection.PhpTypeInfo");
+            CommonPhpArrayKeys = Create("CommonPhpArrayKeys");
+
+            Iterator = CreateFromFullName("Iterator");
+            Traversable = CreateFromFullName("Traversable");
+            Stringable = CreateFromFullName("Stringable");
+            Generator = CreateFromFullName("Generator");
+            GeneratorStateMachineDelegate = CreateFromFullName("GeneratorStateMachineDelegate");
+
+            MainDelegate = Create("Context+MainDelegate");
+            IntPtr = CreateFromFullName("System.IntPtr");
         }
 
         #region Table of types
 
         readonly Dictionary<string, CoreType> _table;
         readonly Dictionary<TypeSymbol, CoreType> _typetable = new Dictionary<TypeSymbol, CoreType>();
-        readonly Dictionary<SpecialType, CoreType> _specialTypes = new Dictionary<SpecialType, CoreType>();
+        //readonly Dictionary<SpecialType, CoreType> _specialTypes = new Dictionary<SpecialType, CoreType>();
 
-        CoreType Create(string name) => CreateFromFullName("Pchp.Core." + name);
+        CoreType Create(string name) => CreateFromFullName(PeachpieRuntimeNamespace + "." + name);
 
         CoreType Create(SpecialType type) => CreateFromFullName(SpecialTypes.GetMetadataName(type));
 
@@ -190,15 +285,15 @@ namespace Pchp.CodeAnalysis.Symbols
             return t;
         }
 
-        /// <summary>
-        /// Gets special core type.
-        /// </summary>
-        public CoreType GetSpecialType(SpecialType type)
-        {
-            CoreType t;
-            _specialTypes.TryGetValue(type, out t);
-            return t;
-        }
+        ///// <summary>
+        ///// Gets special core type.
+        ///// </summary>
+        //public CoreType GetSpecialType(SpecialType type)
+        //{
+        //    CoreType t;
+        //    _specialTypes.TryGetValue(type, out t);
+        //    return t;
+        //}
 
         internal void Update(AssemblySymbol coreass)
         {
@@ -208,15 +303,38 @@ namespace Pchp.CodeAnalysis.Symbols
             {
                 if (t.Symbol == null)
                 {
-                    var mdname = MetadataTypeName.FromFullName(t.FullName, false); ;
-                    var symbol = coreass.LookupTopLevelMetadataType(ref mdname, true);
-                    if (symbol != null && !symbol.IsErrorType())
+                    var fullname = t.FullName;
+
+                    // nested types: todo: in Lookup
+                    string nested = null;
+                    int plus = fullname.IndexOf('+');
+                    if (plus > 0)
                     {
+                        nested = fullname.Substring(plus + 1);
+                        fullname = fullname.Remove(plus);
+                    }
+
+                    var mdname = MetadataTypeName.FromFullName(fullname, false);
+                    var symbol = coreass.LookupTopLevelMetadataType(ref mdname, true);
+                    if (symbol.IsValidType())
+                    {
+                        if (nested != null)
+                        {
+                            symbol = symbol
+                                .GetTypeMembers(nested)
+                                .SingleOrDefault();
+
+                            if (symbol == null)
+                            {
+                                continue;
+                            }
+                        }
+
                         _typetable[symbol] = t;
                         t.Update(symbol);
 
-                        if (symbol.SpecialType != SpecialType.None)
-                            _specialTypes[symbol.SpecialType] = t;
+                        //if (symbol.SpecialType != SpecialType.None)
+                        //    _specialTypes[symbol.SpecialType] = t;
                     }
                 }
             }

@@ -18,8 +18,8 @@ namespace Pchp.Library.Streams
     {
         #region PhpStream overrides
 
-        public NativeStream(Context ctx, Stream nativeStream, StreamWrapper openingWrapper, StreamAccessOptions accessOptions, string openedPath, StreamContext context)
-            : base(ctx, openingWrapper, accessOptions, openedPath, context)
+        public NativeStream(IEncodingProvider enc_provider, Stream nativeStream, StreamWrapper openingWrapper, StreamAccessOptions accessOptions, string openedPath, StreamContext context)
+            : base(enc_provider, openingWrapper, accessOptions, openedPath, context)
         {
             Debug.Assert(nativeStream != null);
             this.stream = nativeStream;
@@ -38,6 +38,7 @@ namespace Pchp.Library.Streams
             catch (NotSupportedException)
             {
             }
+
             if (Wrapper != null)    //Can be php://output
             {
                 Wrapper.Dispose();
@@ -79,9 +80,10 @@ namespace Pchp.Library.Streams
         protected override int RawWrite(byte[] buffer, int offset, int count)
         {
             long position = stream.CanSeek ? stream.Position : -1;
+
             try
             {
-                stream.Write(buffer, offset, count);
+                stream.WriteAsync(buffer, offset, count).GetAwaiter().GetResult();
                 return stream.CanSeek ? unchecked((int)(stream.Position - position)) : count;
             }
             catch (NotSupportedException)
@@ -111,8 +113,10 @@ namespace Pchp.Library.Streams
         {
             get
             {
-                if (stream.CanSeek) return stream.Position == stream.Length;
-                else return reportEof;
+                return stream.CanSeek
+                    ? stream.Position == stream.Length
+                    : reportEof;
+
                 // Otherwise there is no apriori information - will be revealed at next read...
             }
         }
@@ -186,13 +190,8 @@ namespace Pchp.Library.Streams
         //    /// <include file='Doc/Streams.xml' path='docs/property[@name="CanCast"]/*'/>
         //    public override bool CanCast { get { return true; } }
 
-        public override Stream RawStream
-        {
-            get
-            {
-                return stream;
-            }
-        }
+        public override Stream RawStream => stream;
+
         #endregion
 
         #region NativeStream properties

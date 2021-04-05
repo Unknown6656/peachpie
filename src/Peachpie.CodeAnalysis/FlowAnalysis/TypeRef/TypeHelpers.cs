@@ -1,5 +1,8 @@
-﻿using Pchp.CodeAnalysis.FlowAnalysis;
+﻿using Microsoft.CodeAnalysis;
+using Pchp.CodeAnalysis.FlowAnalysis;
 using Pchp.CodeAnalysis.Semantics;
+using Pchp.CodeAnalysis.Semantics.TypeRef;
+using Pchp.CodeAnalysis.Symbols;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -14,6 +17,15 @@ namespace Pchp.CodeAnalysis.FlowAnalysis
     /// </summary>
     internal static class TypeHelpers
     {
+        public static readonly Func<IBoundTypeRef, bool> s_isarray = new Func<IBoundTypeRef, bool>(t => t.IsArray);
+        public static readonly Func<IBoundTypeRef, bool> s_isnumber = new Func<IBoundTypeRef, bool>(IsNumber);
+        public static readonly Func<IBoundTypeRef, bool> s_isobject = new Func<IBoundTypeRef, bool>(t => t.IsObject);
+
+        /// <summary>
+        /// Determines if given <see cref="IBoundTypeRef"/> represents a number (integral or real).
+        /// </summary>
+        public static bool IsNumber(this IBoundTypeRef tref) => tref is BoundPrimitiveTypeRef pt && pt.IsNumber;
+
         ///// <summary>
         ///// Gets value determining whether <paramref name="totype"/> type can be assigned from <paramref name="fromtype"/>.
         ///// </summary>
@@ -29,7 +41,7 @@ namespace Pchp.CodeAnalysis.FlowAnalysis
         //{
         //    Debug.Assert(ctx != null);
         //    Debug.Assert(model != null);
-            
+
         //    if ((totype & fromtype & ~(ulong)TypeRefMask.FlagsMask) != 0)
         //        return true;    // types are equal (or at least one of them is Any Type)
 
@@ -40,7 +52,7 @@ namespace Pchp.CodeAnalysis.FlowAnalysis
 
         //    if (IsImplicitConversion(fromtype, totype, ctx, model))
         //        return true;
-            
+
         //    // cut off object types (primitive types do not have subclasses)
         //    var selfObjs = ctx.GetObjectTypes(totype);
         //    if (selfObjs.Count == 0)
@@ -72,7 +84,7 @@ namespace Pchp.CodeAnalysis.FlowAnalysis
 
         //        // TODO: check whether their element types are assignable,
         //        // avoid infinite recursion!
-                
+
         //        return true;
         //    }
 
@@ -92,7 +104,7 @@ namespace Pchp.CodeAnalysis.FlowAnalysis
 
         //    if (ctx.IsString(totype) && IsConversionToString(fromtype, ctx, model))
         //        return true;
-            
+
         //    //
         //    if (ctx.IsNull(fromtype) && ctx.IsNullable(totype))
         //        return true;    // NULL can be assigned to any nullable
@@ -118,55 +130,104 @@ namespace Pchp.CodeAnalysis.FlowAnalysis
         //    return false;
         //}
 
-        ///// <summary>
-        ///// Checks whether given type is callable.
-        ///// </summary>
-        //internal static bool IsCallable(TypeRefMask type, TypeRefContext/*!*/ctx, ISemanticModel/*!*/model)
-        //{
-        //    if (ctx.IsLambda(type) || ctx.IsString(type) || ctx.IsArray(type))
-        //        return true;
+        /// <summary>
+        /// Checks whether given type may be callable.
+        /// </summary>
+        internal static bool IsCallable(TypeRefContext/*!*/ctx, TypeRefMask type)
+        {
+            if (type.IsAnyType || type.IsRef ||
+                ctx.IsLambda(type) || ctx.IsAString(type) || ctx.IsArray(type) || ctx.IsObject(type))
+            {
+                return true;
+            }
 
-        //    // type has "__invoke" method
-        //    if (type.IsSingleType)  // just optimization
-        //    {
-        //        var tref = ctx.GetObjectTypes(type).FirstOrDefault();
-        //        if (tref != null)
-        //        {
-        //            var node = model.GetClass(tref.QualifiedName);
-        //            // type has __invoke method or is assignable from Closure
-        //            if (node.HasMethod(NameUtils.SpecialNames.__invoke, model) || model.IsAssignableFrom(NameUtils.SpecialNames.Closure, node))
-        //                return true;
-        //        }
-        //    }
+            //// type has "__invoke" method
+            //if (type.IsSingleType)  // just optimization
+            //{
+            //    var tref = ctx.GetObjectTypes(type).FirstOrDefault();
+            //    if (tref != null)
+            //    {
+            //        var node = model.GetClass(tref.QualifiedName);
+            //        // type has __invoke method or is assignable from Closure
+            //        if (node.HasMethod(NameUtils.SpecialNames.__invoke, model) || model.IsAssignableFrom(NameUtils.SpecialNames.Closure, node))
+            //            return true;
+            //    }
+            //}
 
-        //    return false;
-        //}
+            return false;
+        }
 
-        ///// <summary>
-        ///// Gets value indicating whether specified object of type <paramref name="type"/> can handle <c>[]</c> operator.
-        ///// </summary>
-        ///// <param name="type">Type of the object.</param>
-        ///// <param name="ctx">Type context.</param>
-        ///// <param name="model">Type graph.</param>
-        ///// <returns>True iff <c>[]</c> operator is allowed.</returns>
-        //internal static bool HasArrayAccess(TypeRefMask type, TypeRefContext/*!*/ctx, ISemanticModel/*!*/model)
-        //{
-        //    //
-        //    if (type.IsAnyType || type.IsVoid || ctx.IsArray(type) || ctx.IsString(type))
-        //        return true;
+        /// <summary>
+        /// Gets value indicating whether specified object of type <paramref name="type"/> handles <c>[]</c> operator.
+        /// In case of ambiguity, all ambiguities must support the array access operator.
+        /// </summary>
+        /// <param name="type">Type of the object.</param>
+        /// <param name="ctx">Type context.</param>
+        /// <param name="compilation">Type provider.</param>
+        /// <returns>True iff <c>[]</c> operator is allowed.</returns>
+        internal static bool HasArrayAccess(TypeRefMask type, TypeRefContext/*!*/ctx, PhpCompilation/*!*/compilation)
+        {
+            // quick check:
+            if (type.IsAnyType || type.IsVoid || type.IsRef)
+            {
+                return false;
+            }
 
-        //    // object implementing ArrayAccess
-        //    if (ctx.IsObject(type))
-        //    {
-        //        var types = ctx.GetObjectTypes(type);
-        //        foreach (var t in types)
-        //            if (model.IsAssignableFrom(NameUtils.SpecialNames.ArrayAccess, t.QualifiedName))
-        //                return true;
-        //    }
+            // check types with array access operator support:
+            foreach (var t in ctx.GetTypes(type))
+            {
+                var symbol = (TypeSymbol)t.ResolveTypeSymbol(compilation);
 
-        //    //
-        //    return false;
-        //}
+                // TODO: resolve array access operator
+
+                switch (symbol.SpecialType)
+                {
+                    case SpecialType.System_String:
+                        return true;
+
+                    default:
+                        if (symbol == compilation.CoreTypes.PhpString.Symbol ||
+                            symbol == compilation.CoreTypes.PhpArray.Symbol)
+                        {
+                            return true;
+                        }
+
+                        // object implementing ArrayAccess
+
+                        if (symbol.IsValidType() && symbol.IsOfType(compilation.CoreTypes.ArrayAccess.Symbol))
+                        {
+                            return true;
+                        }
+
+                        return false;
+                }
+            }
+
+            // passed all checks:
+            return true;
+        }
+
+        /// <summary>
+        /// Checks the given type mask represents <c>void</c>.
+        /// It may be zero mask (no types) or specifically "void" primitive type.
+        /// </summary>
+        internal static bool IsVoid(this TypeRefMask type, TypeRefContext/*!*/ctx)
+        {
+            if (type.IsVoid)
+            {
+                return true;
+            }
+
+            if (type.IsSingleType &&
+                ctx.GetTypes(type).FirstOrDefault() is BoundPrimitiveTypeRef primitive &&
+                primitive.TypeCode == PhpTypeCode.Void)
+            {
+                return true;
+            }
+
+            //
+            return false;
+        }
 
         ///// <summary>
         ///// Gets value indicating whether specified object of type <paramref name="type"/> can be used as <c>foreach</c> enumerable variable.

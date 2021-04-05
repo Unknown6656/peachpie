@@ -14,7 +14,7 @@ namespace Pchp.CodeAnalysis.Symbols
     /// <summary>
     /// Represents a property or indexer.
     /// </summary>
-    internal abstract partial class PropertySymbol : Symbol, IPropertySymbol
+    internal abstract partial class PropertySymbol : Symbol, IPropertySymbol // TODO: IPhpValue and IPhpValue.HasNotNull
     {
         /// <summary>
         /// As a performance optimization, cache parameter types and refkinds - overload resolution uses them a lot.
@@ -171,17 +171,17 @@ namespace Pchp.CodeAnalysis.Symbols
         {
             get
             {
-                //if (this.IsOverride)
-                //{
-                //    if (IsDefinition)
-                //    {
-                //        return (PropertySymbol)OverriddenOrHiddenMembers.GetOverriddenMember();
-                //    }
+                if (this.IsOverride)
+                {
+                    if (IsDefinition)
+                    {
+                        //return (PropertySymbol)OverriddenOrHiddenMembers.GetOverriddenMember();
+                        return this.ResolveOverridenMember();
+                    }
 
-                //    return (PropertySymbol)OverriddenOrHiddenMembersResult.GetOverriddenMember(this, OriginalDefinition.OverriddenProperty);
-                //}
-                //return null;
-                throw new NotImplementedException();
+                    return (PropertySymbol)OverriddenOrHiddenMembersResult.GetOverriddenMember(this, OriginalDefinition.OverriddenProperty);
+                }
+                return null;
             }
         }
 
@@ -289,6 +289,12 @@ namespace Pchp.CodeAnalysis.Symbols
             return false;
         }
 
+        public virtual bool ReturnsByRef => false;
+
+        public virtual bool ReturnsByRefReadonly => false;
+
+        public virtual RefKind RefKind => RefKind.None;
+
         internal virtual PropertySymbol AsMember(NamedTypeSymbol newOwner)
         {
             Debug.Assert(this.IsDefinition);
@@ -358,6 +364,10 @@ namespace Pchp.CodeAnalysis.Symbols
             get { return this.TypeCustomModifiers; }
         }
 
+        ImmutableArray<CustomModifier> IPropertySymbol.RefCustomModifiers => ImmutableArray<CustomModifier>.Empty;
+
+        NullableAnnotation IPropertySymbol.NullableAnnotation => NullableAnnotation.None;
+
         #endregion
 
         #region ISymbol Members
@@ -376,10 +386,8 @@ namespace Pchp.CodeAnalysis.Symbols
 
         #region Equality
 
-        public override bool Equals(object obj)
+        public override bool Equals(ISymbol other, SymbolEqualityComparer equalityComparer)
         {
-            PropertySymbol other = obj as PropertySymbol;
-
             if (ReferenceEquals(null, other))
             {
                 return false;
@@ -392,7 +400,7 @@ namespace Pchp.CodeAnalysis.Symbols
 
             // This checks if the property have the same definition and the type parameters on the containing types have been
             // substituted in the same way.
-            return this.ContainingType == other.ContainingType && ReferenceEquals(this.OriginalDefinition, other.OriginalDefinition);
+            return other is PropertySymbol p && this.ContainingType == p.ContainingType && ReferenceEquals(this.OriginalDefinition, p.OriginalDefinition);
         }
 
         public override int GetHashCode()

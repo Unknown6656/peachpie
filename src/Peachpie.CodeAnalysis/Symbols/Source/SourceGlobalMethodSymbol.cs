@@ -9,6 +9,7 @@ using Pchp.CodeAnalysis.FlowAnalysis;
 using System.Diagnostics;
 using Devsense.PHP.Syntax;
 using Devsense.PHP.Syntax.Ast;
+using Devsense.PHP.Text;
 
 namespace Pchp.CodeAnalysis.Symbols
 {
@@ -24,15 +25,17 @@ namespace Pchp.CodeAnalysis.Symbols
             Contract.ThrowIfNull(file);
 
             _file = file;
-            _params = BuildParameters().ToImmutableArray();
         }
 
-        protected override IEnumerable<ParameterSymbol> BuildParameters(Signature signature, PHPDocBlock phpdocOpt = null)
-        {
-            throw Roslyn.Utilities.ExceptionUtilities.Unreachable;
-        }
+        internal override Signature SyntaxSignature => new Signature(false, Array.Empty<FormalParam>(), Span.Invalid);
 
-        IEnumerable<ParameterSymbol> BuildParameters()
+        internal override TypeRef SyntaxReturnType => null;
+
+        public override bool IsGlobalScope => true;
+
+        internal override bool RequiresLateStaticBoundParam => false;   // not supported in global code
+
+        protected override IEnumerable<ParameterSymbol> BuildImplicitParams()
         {
             int index = 0;
 
@@ -42,20 +45,21 @@ namespace Pchp.CodeAnalysis.Symbols
             // PhpArray <locals>
             yield return new SpecialParameterSymbol(this, DeclaringCompilation.CoreTypes.PhpArray, SpecialParameterSymbol.LocalsName, index++);
 
-            // object this
+            // object @this
             yield return new SpecialParameterSymbol(this, DeclaringCompilation.CoreTypes.Object, SpecialParameterSymbol.ThisName, index++);
 
-            // TODO: RuntimeTypeHandle <TypeContext>
+            // RuntimeTypeHandle <self>
+            yield return new SpecialParameterSymbol(this, DeclaringCompilation.CoreTypes.RuntimeTypeHandle, SpecialParameterSymbol.SelfName, index++);
         }
 
-        public override ParameterSymbol ThisParameter
+        protected override IEnumerable<SourceParameterSymbol> BuildSrcParams(Signature signature, PHPDocBlock phpdocOpt = null)
         {
-            get
-            {
-                var ps = this.Parameters;
-                return ps.First(p => p.Type.SpecialType == SpecialType.System_Object && p.Name == SpecialParameterSymbol.ThisName);
-            }
+            return Array.Empty<SourceParameterSymbol>();
         }
+
+        public ParameterSymbol ThisParameter => this.ImplicitParameters.First(p => p.Name == SpecialParameterSymbol.ThisName);
+
+        public ParameterSymbol SelfParameter => this.ImplicitParameters.First(SpecialParameterSymbol.IsSelfParameter);
 
         public override string Name => WellKnownPchpNames.GlobalRoutineName;
 
@@ -89,26 +93,18 @@ namespace Pchp.CodeAnalysis.Symbols
         {
             get
             {
-                throw new NotImplementedException();
+                return ImmutableArray.Create(Location.Create(ContainingFile.SyntaxTree, default(Microsoft.CodeAnalysis.Text.TextSpan)));
             }
         }
 
-        public override TypeSymbol ReturnType
-        {
-            get
-            {
-                return BuildReturnType(default(Signature), null, null, this.ResultTypeMask);
-            }
-        }
+        internal override IList<Statement> Statements => _file.SyntaxTree.Root.Statements;
 
-        internal override IList<Statement> Statements => _file.Syntax.Statements;
-
-        internal override AstNode Syntax => _file.Syntax;
+        internal override AstNode Syntax => _file.SyntaxTree.Root;
 
         internal override PHPDocBlock PHPDocBlock => null;
 
         internal override PhpCompilation DeclaringCompilation => _file.DeclaringCompilation;
 
-        protected override TypeRefContext CreateTypeRefContext() => new TypeRefContext(_file.Syntax.ContainingSourceUnit, null);
+        protected override TypeRefContext CreateTypeRefContext() => new TypeRefContext(DeclaringCompilation, null);
     }
 }

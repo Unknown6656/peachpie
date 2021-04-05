@@ -41,6 +41,28 @@ namespace Pchp.CodeAnalysis.FlowAnalysis
         readonly SourceRoutineSymbol _routine;
 
         /// <summary>
+        /// Gets reference to containing file symbol.
+        /// Cannot be <c>null</c>.
+        /// </summary>
+        internal SourceFileSymbol ContainingFile
+        {
+            get
+            {
+                if (Routine != null)
+                {
+                    return Routine.ContainingFile;
+                }
+
+                if (_typeCtx.SelfType != null)
+                {
+                    return ((SourceTypeSymbol)_typeCtx.SelfType).ContainingFile;
+                }
+
+                throw new InvalidOperationException();
+            }
+        }
+
+        /// <summary>
         /// Map of variables name and their index.
         /// </summary>
         readonly Dictionary<VariableName, int>/*!*/_varsIndex;
@@ -59,8 +81,13 @@ namespace Pchp.CodeAnalysis.FlowAnalysis
         /// <summary>
         /// Merged return expressions type.
         /// </summary>
-        internal TypeRefMask ReturnType { get { return _returnType; } set { _returnType = value; } }
-        TypeRefMask _returnType;
+        internal TypeRefMask ReturnType { get; set; }
+
+        /// <summary>
+        /// Version of the analysis, incremented whenever a set of semantic tree transformations happen.
+        /// </summary>
+        internal int Version => _version;
+        int _version;
 
         #endregion
 
@@ -69,7 +96,7 @@ namespace Pchp.CodeAnalysis.FlowAnalysis
         internal FlowContext(TypeRefContext/*!*/typeCtx, SourceRoutineSymbol routine)
         {
             Contract.ThrowIfNull(typeCtx);
-            
+
             _typeCtx = typeCtx;
             _routine = routine;
 
@@ -84,28 +111,44 @@ namespace Pchp.CodeAnalysis.FlowAnalysis
         /// <summary>
         /// Gets index of variable within the context.
         /// </summary>
-        public int GetVarIndex(VariableName name)
+        public VariableHandle GetVarIndex(VariableName name)
         {
-            Debug.Assert(!name.IsEmpty());
+            Debug.Assert(name.IsValid());
+
+            // TODO: RW lock
 
             int index;
             if (!_varsIndex.TryGetValue(name, out index))
             {
-                lock (_varsType)
+                lock (_varsIndex)
                 {
                     index = _varsType.Length;
                     Array.Resize(ref _varsType, index + 1);
-                }
 
-                _varsIndex[name] = index;
+                    //
+                    _varsIndex[name] = index;
+                }
             }
 
-            return index;
+            //
+            return new VariableHandle() { Slot = index, Name = name };
+        }
+
+        /// <summary>
+        /// Enumerates all known variables as pairs of their index and name.
+        /// </summary>
+        public IEnumerable<VariableHandle> EnumerateVariables()
+        {
+            return _varsIndex.Select(pair => new VariableHandle()
+            {
+                Slot = pair.Value,
+                Name = pair.Key,
+            });
         }
 
         public void SetReference(int varindex)
         {
-            if (varindex >= 0 && varindex < BitsCount)
+            if (varindex >= 0 && varindex < _varsType.Length)
             {
                 _varsType[varindex] |= TypeRefMask.IsRefMask;
             }
@@ -130,7 +173,8 @@ namespace Pchp.CodeAnalysis.FlowAnalysis
 
         public TypeRefMask GetVarType(VariableName name)
         {
-            return _varsType[GetVarIndex(name)];
+            var idx = GetVarIndex(name);
+            return _varsType[idx];
         }
 
         /// <summary>
@@ -156,6 +200,39 @@ namespace Pchp.CodeAnalysis.FlowAnalysis
         {
             // anything >= 64 is used
             return varindex < 0 || varindex >= BitsCount || (_usedMask & (ulong)1 << varindex) != 0;
+        }
+
+        /// <summary>
+        /// Discard the current flow analysis information, should be called whenever the routine is transformed.
+        /// </summary>
+        /// <remarks>
+        /// It is expected to be called either on a context without a routine (parameter initializers etc.) or
+        /// on a routine with a CFG, hence no abstract methods etc.
+        /// </remarks>
+        public void InvalidateAnalysis()
+        {
+            Debug.Assert(Routine?.ControlFlowGraph != null);
+
+            // By incrementing the version, the current flow states won't be valid any longer
+            _version++;
+
+            // Reset internal structures to prevent possible bugs in re-analysis
+            _usedMask = 0;
+            _varsIndex.Clear();
+            _varsType = EmptyArray<TypeRefMask>.Instance;
+
+            // Revert the information regarding the return type to the default state
+            ReturnType = default;
+
+            // TODO: Recreate the state also in the case of a standalone expression (such as a parameter initializer)
+            if (_routine != null)
+            {
+                // Reset routine properties related to the analysis
+                _routine.IsReturnAnalysed = false;
+
+                // Recreate the entry state to enable another analysis
+                _routine.ControlFlowGraph.Start.FlowState = StateBinder.CreateInitialState(_routine, this);
+            }
         }
 
         #endregion

@@ -1,9 +1,11 @@
 ﻿using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CodeGen;
+using Microsoft.CodeAnalysis.Debugging;
 using Microsoft.CodeAnalysis.Emit;
 using Pchp.CodeAnalysis.Emit;
 using Pchp.CodeAnalysis.Semantics;
 using Pchp.CodeAnalysis.Symbols;
+using Pchp.CodeAnalysis.Utilities;
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
@@ -18,9 +20,23 @@ namespace Pchp.CodeAnalysis.CodeGen
 {
     internal sealed class MethodGenerator
     {
-        private static Cci.DebugSourceDocument CreateDebugDocumentForFile(string normalizedPath)
+        static Cci.DebugSourceDocument CreateDebugSourceDocument(string normalizedPath, MethodSymbol method)
         {
-            return new Cci.DebugSourceDocument(normalizedPath, Constants.CorSymLanguageTypePeachpie);
+            // TODO: method might be synthesized and we create an incomplete DebugSourceDocument
+
+            var srcf = (method as SourceRoutineSymbol)?.ContainingFile;
+            if (srcf != null && srcf.SyntaxTree.TryGetText(out var srctext))
+            {
+                return new Cci.DebugSourceDocument(
+                    normalizedPath,
+                    Constants.CorSymLanguageTypePeachpie,
+                    srctext.GetChecksum(),
+                    SourceHashAlgorithms.GetAlgorithmGuid(srctext.ChecksumAlgorithm));
+            }
+            else
+            {
+                return new Cci.DebugSourceDocument(normalizedPath, Constants.CorSymLanguageTypePeachpie);
+            }
         }
 
         internal static MethodBody GenerateMethodBody(
@@ -37,15 +53,8 @@ namespace Pchp.CodeAnalysis.CodeGen
         {
             return GenerateMethodBody(moduleBuilder, routine, (builder) =>
             {
-                DiagnosticBag diagnosticsForThisMethod = DiagnosticBag.GetInstance();
                 var optimization = moduleBuilder.Compilation.Options.OptimizationLevel;
-                var codeGen = new CodeGenerator(routine, builder, moduleBuilder, diagnosticsForThisMethod, optimization, emittingPdb);
-
-                //if (diagnosticsForThisMethod.HasAnyErrors())
-                //{
-                //    // we are done here. Since there were errors we should not emit anything.
-                //    return null;
-                //}
+                var codeGen = new CodeGenerator(routine, builder, moduleBuilder, diagnostics, optimization, emittingPdb);
 
                 // We need to save additional debugging information for MoveNext of an async state machine.
                 //var stateMachineMethod = method as SynthesizedStateMachineMethod;
@@ -94,13 +103,27 @@ namespace Pchp.CodeAnalysis.CodeGen
 
             if (emittingPdb)
             {
-                debugDocumentProvider = (path, basePath) => moduleBuilder.GetOrAddDebugDocument(path, basePath, CreateDebugDocumentForFile);
+                debugDocumentProvider = (path, basePath) =>
+                {
+                    if (path.IsPharFile())
+                    {
+                        path = PhpFileUtilities.BuildPharStubFileName(path);
+                    }
+
+                    return moduleBuilder.DebugDocumentsBuilder.GetOrAddDebugDocument(
+                        path,
+                        basePath,
+                        normalizedPath => CreateDebugSourceDocument(normalizedPath, routine));
+                };
             }
 
-            ILBuilder il = new ILBuilder(moduleBuilder, localSlotManager, optimizations);
+            // TODO: Check whether in some cases we cannot skip it
+            bool areLocalsZeroed = true;
+
+            ILBuilder il = new ILBuilder(moduleBuilder, localSlotManager, optimizations.AsOptimizationLevel(), areLocalsZeroed);
             try
             {
-                Cci.AsyncMethodBodyDebugInfo asyncDebugInfo = null;
+                StateMachineMoveNextBodyDebugInfo stateMachineMoveNextDebugInfo = null;
 
                 builder(il);
 
@@ -128,7 +151,7 @@ namespace Pchp.CodeAnalysis.CodeGen
                 //}
 
                 // Only compiler-generated MoveNext methods have iterator scopes.  See if this is one.
-                var stateMachineHoistedLocalScopes = default(ImmutableArray<Cci.StateMachineHoistedLocalScope>);
+                var stateMachineHoistedLocalScopes = default(ImmutableArray<StateMachineHoistedLocalScope>);
                 //if (isStateMachineMoveNextMethod)
                 //{
                 //    stateMachineHoistedLocalScopes = builder.GetHoistedLocalScopes();
@@ -152,6 +175,8 @@ namespace Pchp.CodeAnalysis.CodeGen
                     il.RealizedSequencePoints,
                     debugDocumentProvider,
                     il.RealizedExceptionHandlers,
+                    il.AreLocalsZeroed,
+                    hasStackalloc: false,   // No support for stackalloc in PHP
                     il.GetAllScopes(),
                     il.HasDynamicLocal,
                     null, // importScopeOpt,
@@ -161,7 +186,8 @@ namespace Pchp.CodeAnalysis.CodeGen
                     stateMachineHoistedLocalScopes,
                     stateMachineHoistedLocalSlots,
                     stateMachineAwaiterSlots,
-                    asyncDebugInfo);
+                    stateMachineMoveNextDebugInfo,
+                    null);  // dynamicAnalysisDataOpt
             }
             finally
             {
@@ -206,7 +232,7 @@ namespace Pchp.CodeAnalysis.CodeGen
                 //}
 
                 // Only compiler-generated MoveNext methods have iterator scopes.  See if this is one.
-                var stateMachineHoistedLocalScopes = default(ImmutableArray<Cci.StateMachineHoistedLocalScope>);
+                var stateMachineHoistedLocalScopes = default(ImmutableArray<StateMachineHoistedLocalScope>);
                 //if (isStateMachineMoveNextMethod)
                 //{
                 //    stateMachineHoistedLocalScopes = builder.GetHoistedLocalScopes();
@@ -230,6 +256,8 @@ namespace Pchp.CodeAnalysis.CodeGen
                     il.RealizedSequencePoints,
                     null,
                     il.RealizedExceptionHandlers,
+                    il.AreLocalsZeroed,
+                    hasStackalloc: false,   // No support for stackalloc in PHP
                     il.GetAllScopes(),
                     il.HasDynamicLocal,
                     null, // importScopeOpt,
@@ -239,7 +267,8 @@ namespace Pchp.CodeAnalysis.CodeGen
                     stateMachineHoistedLocalScopes,
                     stateMachineHoistedLocalSlots,
                     stateMachineAwaiterSlots,
-                    null);
+                    null,   // stateMachineMoveNextDebugInfoOpt
+                    null);  // dynamicAnalysisDataOpt
             }
             finally
             {

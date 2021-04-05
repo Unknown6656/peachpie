@@ -229,8 +229,7 @@ namespace Pchp.CodeAnalysis.Symbols
         {
             get
             {
-                //return this.ReturnType is ByRefReturnErrorTypeSymbol;
-                return false;
+                return RefKind != RefKind.None;
             }
         }
 
@@ -530,7 +529,10 @@ namespace Pchp.CodeAnalysis.Symbols
             get
             {
                 CheckDefinitionInvariant();
-                return this.IsMetadataVirtual();
+                var isvirt = this.IsMetadataVirtual();
+                Debug.Assert(isvirt || (!IsMetadataFinal && !IsMetadataNewSlot()), "Method marked Final or NewSlot or CheckAccessOnOverride but not Virtual.");
+                Debug.Assert(!isvirt || this.MethodKind != MethodKind.Constructor, $"Virtual Instance Constructor in {ContainingType?.Name} - instance constructor cannot be marked Virtual.");
+                return isvirt;
             }
         }
 
@@ -566,22 +568,18 @@ namespace Pchp.CodeAnalysis.Symbols
             }
         }
 
-        IEnumerable<Cci.ICustomAttribute> Cci.IMethodDefinition.ReturnValueAttributes
+        IEnumerable<Cci.ICustomAttribute> Cci.IMethodDefinition.GetReturnValueAttributes(EmitContext context)
         {
-            get
-            {
-                return GetReturnValueCustomAttributesToEmit().Cast<Cci.ICustomAttribute>();
-            }
+            return GetReturnValueCustomAttributesToEmit().Cast<Cci.ICustomAttribute>();
         }
 
         private IEnumerable<AttributeData> GetReturnValueCustomAttributesToEmit()
         {
             CheckDefinitionInvariant();
 
-            //ImmutableArray<CSharpAttributeData> userDefined;
             //ArrayBuilder<SynthesizedAttributeData> synthesized = null;
 
-            //userDefined = this.GetReturnTypeAttributes();
+            var userDefined = this.GetReturnTypeAttributes();
             //this.AddSynthesizedReturnTypeAttributes(ref synthesized);
 
             //if (userDefined.IsEmpty && synthesized == null)
@@ -592,7 +590,8 @@ namespace Pchp.CodeAnalysis.Symbols
             //// Note that callers of this method (CCI and ReflectionEmitter) have to enumerate 
             //// all items of the returned iterator, otherwise the synthesized ArrayBuilder may leak.
             //return GetCustomAttributesToEmit(userDefined, synthesized, isReturnType: true, emittingAssemblyAttributesInNetModule: false);
-            yield break;
+
+            return userDefined;
         }
 
         bool Cci.IMethodDefinition.ReturnValueIsMarshalledExplicitly
@@ -648,5 +647,7 @@ namespace Pchp.CodeAnalysis.Symbols
                 return (Cci.INamespace)ContainingNamespace;
             }
         }
+
+        ImmutableArray<Cci.ICustomModifier> Cci.ISignature.RefCustomModifiers => ImmutableArray<Cci.ICustomModifier>.Empty;
     }
 }

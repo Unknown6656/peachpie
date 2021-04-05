@@ -12,17 +12,28 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
 using Pchp.CodeAnalysis.FlowAnalysis;
+using Microsoft.CodeAnalysis.Symbols;
 
 namespace Pchp.CodeAnalysis.Symbols
 {
     /// <summary>
     /// Represents a field in a class, struct or enum
     /// </summary>
-    internal abstract partial class FieldSymbol : Symbol, IFieldSymbol, IPhpValue
+    internal abstract partial class FieldSymbol : Symbol, IFieldSymbol, IFieldSymbolInternal, IPhpValue
     {
         internal FieldSymbol()
         {
         }
+
+        /// <summary>
+        /// Optional. Gets the initializer.
+        /// </summary>
+        public virtual BoundExpression Initializer => null;
+
+        /// <summary>
+        /// Value indicating the field has [NotNull] metadata.
+        /// </summary>
+        public virtual bool HasNotNull => false;
 
         /// <summary>
         /// The original definition of this symbol. If this symbol is constructed from another
@@ -86,6 +97,11 @@ namespace Pchp.CodeAnalysis.Symbols
         public virtual int FixedSize { get { return 0; } }
 
         /// <summary>
+        /// Gets value indicating the field is hidden from PHP reflection.
+        /// </summary>
+        public virtual bool IsPhpHidden => false;
+
+        /// <summary>
         /// If this.IsFixed is true, returns the underlying implementation type for the
         /// fixed-size buffer when emitted.  Otherwise returns null.
         /// </summary>
@@ -109,7 +125,12 @@ namespace Pchp.CodeAnalysis.Symbols
         // metadata constant unless they are of type decimal, because decimals are not regarded as constant by the CLR.
         public bool IsMetadataConstant
         {
-            get { return this.IsConst && (this.Type.SpecialType != SpecialType.System_Decimal); }
+            get
+            {
+                var isconst = this.IsConst && (this.Type.SpecialType != SpecialType.System_Decimal);
+                Debug.Assert(!isconst || IsStatic, "Literal field must be Static.");
+                return isconst;
+            }
         }
 
         /// <summary>
@@ -160,6 +181,12 @@ namespace Pchp.CodeAnalysis.Symbols
                 return SymbolKind.Field;
             }
         }
+
+        /// <summary>
+        /// If this field represents a tuple element, returns a corresponding default element
+        ///  field. Otherwise returns null.
+        /// </summary>
+        public virtual IFieldSymbol CorrespondingTupleField => null;
 
         /// <summary>
         /// Returns false because field can't be abstract.
@@ -295,6 +322,10 @@ namespace Pchp.CodeAnalysis.Symbols
         {
             get { return this.OriginalDefinition; }
         }
+
+        bool IFieldSymbol.IsFixedSizeBuffer => false;
+
+        NullableAnnotation IFieldSymbol.NullableAnnotation => NullableAnnotation.None;
 
         #endregion
 

@@ -6,6 +6,8 @@ using System.Linq;
 using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
+using Pchp.Core.Reflection;
+using Pchp.Core.Text;
 
 namespace Pchp.Core
 {
@@ -16,11 +18,6 @@ namespace Pchp.Core
     /// </summary>
     public interface IPhpConvertible
     {
-        /// <summary>
-        /// Gets the object type code.
-        /// </summary>
-        PhpTypeCode TypeCode { get; }
-
         /// <summary>
         /// Converts the object to <see cref="double"/>.
         /// </summary>
@@ -49,17 +46,17 @@ namespace Pchp.Core
         /// <summary>
         /// Converts instance to its string representation according to PHP conversion algorithm.
         /// </summary>
-        string ToString(Context ctx);
-
-        /// <summary>
-		/// Converts instance to its string representation according to PHP conversion algorithm.
-		/// </summary>
-		string ToStringOrThrow(Context ctx);
+        string ToString();
 
         /// <summary>
         /// In case of a non class object, boxes value to an object.
         /// </summary>
         object ToClass();
+
+        /// <summary>
+        /// Converts the object to array.
+        /// </summary>
+        PhpArray ToArray();
     }
 
     #endregion
@@ -67,9 +64,10 @@ namespace Pchp.Core
     #region Convert
 
     [DebuggerNonUserCode]
+    //[DebuggerStepperBoundary]
     public static class Convert
     {
-        #region ToString
+        #region ToString, ToBytes
 
         /// <summary>
         /// Gets string representation of a boolean value (according to PHP, it is <c>"1"</c> or <c>""</c>).
@@ -79,17 +77,113 @@ namespace Pchp.Core
         /// <summary>
         /// Gets string representation of an integer value.
         /// </summary>
-        public static string ToString(long value) => value.ToString();
+        public static string ToString(long value) => value.ToString(Context.InvariantNumberFormatInfo);
 
         /// <summary>
         /// Gets string representation of an integer value.
         /// </summary>
-        public static string ToString(int value) => value.ToString();
+        public static string ToString(int value) => value.ToString(Context.InvariantNumberFormatInfo);
 
         /// <summary>
         /// Gets string representation of a floating point number value.
         /// </summary>
-        public static string ToString(double value, Context ctx) => value.ToString("G", ctx.NumberFormat);
+        public static string ToString(double value) => value.ToString(Context.InvariantNumberFormatInfo); // format "G" by default
+
+        public static string ToString(IPhpConvertible value) => value.ToString();
+
+        /// <summary>
+        /// Converts class instance to a string.
+        /// </summary>
+        public static string ToString(object value)
+        {
+            if (value is IPhpConvertible conv)   // TODO: should be sufficient to call just ToString(), implementations of IPhpConvertible override ToString always
+            {
+                return conv.ToString();
+            }
+            else
+            {
+                return value.ToString();
+            }
+        }
+
+        /// <summary>
+        /// Converts mutable string to string.
+        /// </summary>
+        public static string ToString(PhpString value, Context ctx) => value.ToString(ctx);
+
+        /// <summary>
+        /// Converts mutable string to byte[].
+        /// </summary>
+        public static byte[] ToBytes(PhpString value, Context ctx) => value.ToBytes(ctx);
+
+        /// <summary>
+        /// Converts mutable string to byte[].
+        /// </summary>
+        public static byte[] ToBytes(string value, Context ctx) => ctx.StringEncoding.GetBytes(value);
+
+        /// <summary>
+        /// Converts mutable string to byte[].
+        /// </summary>
+        public static byte[] ToBytes(PhpValue value, Context ctx) => value.ToBytes(ctx);
+
+        #endregion
+
+        #region ToChar
+
+        /// <summary>
+		/// Converts string to a single character.
+		/// </summary>
+		/// <param name="str">The string to convert.</param>
+		/// <returns>The first character of the string.</returns>
+		/// <exception cref="PhpException"><paramref name="str"/> doesn't consist of a single character. (Warning)</exception>
+		public static char ToChar(string str)
+        {
+            if (str == null || str.Length != 1)
+            {
+                PhpException.Throw(PhpError.Warning, Resources.ErrResources.string_should_be_single_character);
+                if (string.IsNullOrEmpty(str))
+                {
+                    return '\0';
+                }
+            }
+
+            return str[0];
+        }
+
+        /// <summary>
+		/// Converts string to a single character.
+		/// </summary>
+		/// <returns>The first character of the string.</returns>
+		/// <exception cref="PhpException"><paramref name="value"/> doesn't consist of a single character. (Warning)</exception>
+		public static char ToChar(PhpValue value)
+        {
+            switch (value.TypeCode)
+            {
+                case PhpTypeCode.Alias:
+                    return ToChar(value.Alias.Value);
+
+                case PhpTypeCode.String:
+                    return ToChar(value.String);
+
+                case PhpTypeCode.MutableString:
+                    if (value.MutableStringBlob.Length == 0) goto default;
+                    return value.MutableStringBlob[0].AsChar();
+
+                case PhpTypeCode.Double:
+                    return ToChar(value.Double);
+
+                case PhpTypeCode.Long:
+                    return ToChar(value.Long);
+
+                default:
+                    PhpException.Throw(PhpError.Warning, Resources.ErrResources.string_should_be_single_character);
+                    return default; // '\0'
+            }
+        }
+
+        public static char ToChar(long value) => (char)value;
+
+        public static char ToChar(double value) => (char)value;
 
         #endregion
 
@@ -129,6 +223,22 @@ namespace Pchp.Core
         }
 
         /// <summary>
+        /// Converts string to boolean according to PHP.
+        /// </summary>
+        internal static bool ToBoolean(BlobChar[] value)
+        {
+            // not null
+            // not empty
+            // not "0"
+            return value != null && value.Length != 0 && (value.Length != 1 || value[0].AsChar() != '0');
+        }
+
+        /// <summary>
+        /// Converts string to boolean according to PHP.
+        /// </summary>
+        public static bool ToBoolean(PhpString value) => value.ToBoolean();
+
+        /// <summary>
         /// Converts class instance to boolean according to PHP.
         /// </summary>
         public static bool ToBoolean(object value)
@@ -137,19 +247,116 @@ namespace Pchp.Core
             return value != null && ((convertible = value as IPhpConvertible) == null || convertible.ToBoolean());
         }
 
+        /// <summary>
+        /// Converts to boolean according to PHP.
+        /// </summary>
+        public static bool ToBoolean(IPhpConvertible value) => value != null && value.ToBoolean();
+
         #endregion
 
-        #region AsObject, AsArray, ToClass, AsCallable
+        #region AsObject, ToArray, ToPhpString, ToClass, AsCallable
 
         /// <summary>
         /// Gets underlaying class instance or <c>null</c>.
         /// </summary>
-        public static object AsObject(PhpValue value) => value.AsObject();
+        public static object AsObject(PhpValue value) => value.AsObject(); // TOOD: ?? throw new InvalidCastException();
 
         /// <summary>
-        /// Gets the array access object.
+        /// Converts value to an array.
         /// </summary>
-        public static object AsArray(PhpValue value) => value.AsArray();
+        public static PhpArray ToArray(PhpValue value) => value.ToArray();
+
+        public static PhpArray ToArray(object obj) => ClassToArray(obj);
+
+        public static PhpArray ToArray(long value) => PhpArray.New(value);
+
+        public static PhpArray ToArray(double value) => PhpArray.New(value);
+
+        public static PhpArray ToArray(bool value) => PhpArray.New(value);
+
+        public static PhpArray ToArray(IPhpConvertible value) => value.ToArray();
+
+        /// <summary>
+        /// Casts value to <see cref="PhpArray"/> or <c>null</c>.
+        /// </summary>
+        public static PhpArray AsArray(PhpValue value) => value.AsArray();
+
+        /// <summary>
+        /// Creates <see cref="PhpArray"/> from object's properties.
+        /// </summary>
+        /// <param name="obj">Object instance.</param>
+        /// <returns>Array containing given object properties keyed according to PHP specifications.</returns>
+        public static PhpArray ClassToArray(object obj)
+        {
+            if (object.ReferenceEquals(obj, null))
+            {
+                return PhpArray.NewEmpty();
+            }
+            else if (obj.GetType() == typeof(stdClass))
+            {
+                // special case,
+                // object is stdClass, we can simply copy its runtime fields
+                var runtime_fields = ((stdClass)obj).GetRuntimeFields();
+                return (runtime_fields != null) ? runtime_fields.DeepCopy() : PhpArray.NewEmpty();
+            }
+            else
+            {
+                if (obj is IPhpConvertible conv)
+                {
+                    return ToArray(conv);
+                }
+                else if (obj is Array)
+                {
+                    // [] -> array
+                    return new PhpArray((Array)obj);
+                }
+                else if (obj is System.Collections.IEnumerable)
+                {
+                    // the same behavior as foreach for CLR enumerators
+                    return PhpArray.Create(Operators.GetForeachEnumerator((System.Collections.IEnumerable)obj));
+                }
+                else
+                {
+                    // obj -> array
+                    var arr = new PhpArray();
+                    TypeMembersUtils.InstanceFieldsToPhpArray(obj, arr);
+                    return arr;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Gets the underlying PHP string if present, a new PHP string representing the value otherwise.
+        /// </summary>
+        public static PhpString ToPhpString(this PhpValue value, Context ctx)
+        {
+            switch (value.TypeCode)
+            {
+                case PhpTypeCode.Alias:
+                    return ToPhpString(value.Alias.Value, ctx);
+
+                case PhpTypeCode.MutableString:
+                    return value.MutableString;
+                case PhpTypeCode.String:
+                    return new PhpString(value.String);
+                default:
+                    return new PhpString(value.ToString(ctx));
+            }
+        }
+
+        public static stdClass ToObject(bool value) => new stdClass(value);
+
+        public static stdClass ToObject(long value) => new stdClass(value);
+
+        public static stdClass ToObject(double value) => new stdClass(value);
+
+        public static stdClass ToObject(string value) => new stdClass(value);
+
+        public static stdClass ToObject(byte[] value) => new stdClass(new PhpString(value));
+
+        public static stdClass ToObject(PhpString value) => new stdClass(PhpValue.Create(value.DeepCopy()));
+
+        public static object ToObject(IPhpConvertible value) => value.ToClass();
 
         /// <summary>
         /// Converts given value to a class object.
@@ -181,27 +388,54 @@ namespace Pchp.Core
         /// <summary>
         /// Gets value as a callable object that can be invoked dynamically.
         /// </summary>
-        public static IPhpCallable AsCallable(PhpValue value) => value.AsCallable();
+        public static IPhpCallable AsCallable(PhpValue value, RuntimeTypeHandle callerCtx, object callerObj) => value.AsCallable(callerCtx, callerObj);
 
         /// <summary>
         /// Creates a callable object from string value.
         /// </summary>
-        public static IPhpCallable AsCallable(string value) => PhpCallback.Create(value);
+        public static IPhpCallable AsCallable(string value, RuntimeTypeHandle callerCtx, object callerObj) => PhpCallback.Create(value, callerCtx, callerObj);
 
         /// <summary>
-        /// Resolves whether given instance <paramref name="value"/> is of given type <paramref name="tinfo"/>.
+        /// Creates a callable object from string value.
         /// </summary>
-        /// <param name="value">Value to be checked.</param>
-        /// <param name="tinfo">Type descriptor.</param>
-        /// <returns>Whether <paramref name="value"/> is of type <paramref name="tinfo"/>.</returns>
-        public static bool IsInstanceOf(object value, Reflection.PhpTypeInfo tinfo)
+        public static IPhpCallable AsCallable(PhpArray array, RuntimeTypeHandle callerCtx, object callerObj)
         {
-            if (tinfo == null)
+            if (array.Count == 2)
             {
-                throw new ArgumentNullException(nameof(tinfo));
+                if (array.TryGetValue(0, out var obj) &&
+                    array.TryGetValue(1, out var method))
+                {
+                    // [ class => object|string, methodname => string ]
+                    return PhpCallback.Create(obj, method, callerCtx, callerObj);
+                }
             }
 
-            return tinfo.Type.GetTypeInfo().IsInstanceOfType(value);
+            // invalid
+            return PhpCallback.CreateInvalid();
+        }
+
+        public static IPhpCallable ClassAsCallable(object obj, RuntimeTypeHandle callerCtx, object callerObj)
+        {
+            if (obj is IPhpCallable callable) return callable;  // classes with __invoke() magic method implements IPhpCallable
+            if (obj is Delegate d) return RoutineInfo.CreateUserRoutine(d.GetMethodInfo().Name, d);
+
+            return PhpCallback.CreateInvalid();
+        }
+
+        /// <summary>
+        /// Resolves whether given instance <paramref name="obj"/> is of given type <paramref name="tinfo"/>.
+        /// </summary>
+        /// <param name="obj">Value to be checked.</param>
+        /// <param name="tinfo">Type descriptor.</param>
+        /// <returns>Whether <paramref name="obj"/> is of type <paramref name="tinfo"/>.</returns>
+        public static bool IsInstanceOf(object obj, PhpTypeInfo tinfo)
+        {
+            // note: if tinfo is null =>
+            // type was not declared =>
+            // value cannot be its instance because there is no way how to instantiate it
+            // ignoring the case when object is passed from CLR
+
+            return obj != null && tinfo != null && tinfo.Type.IsInstanceOfType(obj);
         }
 
         #endregion
@@ -210,11 +444,37 @@ namespace Pchp.Core
 
         public static NumberInfo ToNumber(string str, out PhpNumber number)
         {
-            long l;
-            double d;
-            var info = StringToNumber(str, out l, out d);
+            var info = StringToNumber(str, out var l, out var d);
             number = ((info & NumberInfo.Double) != 0) ? PhpNumber.Create(d) : PhpNumber.Create(l);
             return info;
+        }
+
+        public static NumberInfo ToNumber(object obj, out PhpNumber number)
+        {
+            if (obj is IPhpConvertible convertible)
+            {
+                return convertible.ToNumber(out number);
+            }
+            else if (obj is decimal d)
+            {
+                number = PhpNumber.Create((double)d);
+                return NumberInfo.IsNumber | NumberInfo.Double;
+            }
+            else
+            {
+                PhpException.Throw(PhpError.Notice, string.Format(Resources.ErrResources.object_could_not_be_converted, obj.GetPhpTypeInfo().Name, PhpVariable.TypeNameInt));
+                number = PhpNumber.Create(1L);
+                return Convert.NumberInfo.LongInteger;
+            }
+        }
+
+        /// <summary>
+        /// Converts given string to a number.
+        /// </summary>
+        public static PhpNumber ToNumber(string str)
+        {
+            var info = StringToNumber(str, out var l, out var d);
+            return ((info & NumberInfo.Double) != 0) ? PhpNumber.Create(d) : PhpNumber.Create(l);
         }
 
         /// <summary>
@@ -223,14 +483,58 @@ namespace Pchp.Core
         /// </summary>
         public static PhpNumber ToNumber(PhpValue value)
         {
-            PhpNumber n;
-            if ((value.ToNumber(out n) & NumberInfo.IsNumber) == 0)
+            if ((value.ToNumber(out var n) & NumberInfo.IsNumber) == 0)
             {
                 // TODO: Err
             }
 
             return n;
         }
+
+        /// <summary>
+        /// Performs conversion of a value to a number.
+        /// </summary>
+        public static PhpNumber ToNumber(PhpString value) => value.ToNumber();
+
+        #endregion
+
+        #region ToInt, ToLong, ToDouble
+
+        public static long ToLong(string value) => StringToLongInteger(value);
+
+        public static long ToLong(object obj)
+        {
+            if (obj is IPhpConvertible convertible)
+            {
+                return convertible.ToLong();
+            }
+            else
+            {
+                PhpException.Throw(PhpError.Notice, string.Format(Resources.ErrResources.object_could_not_be_converted, obj.GetPhpTypeInfo().Name, PhpVariable.TypeNameInt));
+                return 1L;
+            }
+        }
+
+        public static double ToDouble(string value) => StringToDouble(value);
+
+        public static double ToDouble(object obj)
+        {
+            if (obj is IPhpConvertible convertible)
+            {
+                return convertible.ToDouble();
+            }
+            else
+            {
+                PhpException.Throw(PhpError.Notice, string.Format(Resources.ErrResources.object_could_not_be_converted, obj.GetPhpTypeInfo().Name, PhpVariable.TypeNameDouble));
+                return 1.0;
+            }
+        }
+
+        //public static int ToInt(this IPhpArray value) => value.Count;
+
+        //public static int ToLong(this IPhpArray value) => ToInt(value);
+
+        //public static int ToDouble(this IPhpArray value) => ToInt(value);
 
         #endregion
 
@@ -239,31 +543,100 @@ namespace Pchp.Core
         /// <summary>
         /// Converts given value to an array key.
         /// </summary>
-        public static IntStringKey ToIntStringKey(PhpValue value) => value.ToIntStringKey();
+        /// <exception cref="ArgumentException">The value cannot be converted to <see cref="IntStringKey"/>.</exception>
+        public static IntStringKey ToIntStringKey(PhpValue value) => value.TryToIntStringKey(out var key)
+            ? key
+            : throw new ArgumentException();
 
         /// <summary>
         /// Tries conversion to an array key.
         /// </summary>
-        public static bool TryToIntStringKey(PhpValue value, out IntStringKey key)
+        public static bool TryToIntStringKey(PhpValue value, out IntStringKey key) => value.TryToIntStringKey(out key);
+
+        /// <summary>
+		/// Converts a string to an appropriate integer.
+		/// </summary>
+		/// <param name="str">The string in "{0 | -?[1-9][0-9]*}" format.</param>
+		/// <returns>The array key (integer or string).</returns>
+		public static IntStringKey StringToArrayKey(string/*!*/str)
         {
-            switch (value.TypeCode)
+            Debug.Assert(str != null, "str == null");
+
+            // empty string:
+            if (str.Length == 0)
             {
-                case PhpTypeCode.Int32:
-                case PhpTypeCode.Long:
-                case PhpTypeCode.Double:
-                case PhpTypeCode.String:
-                case PhpTypeCode.WritableString:
-                case PhpTypeCode.Boolean:
-                    key = value.ToIntStringKey();
-                    return true;
-
-                case PhpTypeCode.Alias:
-                    return TryToIntStringKey(value.Alias.Value, out key);
-
-                default:
-                    key = default(IntStringKey);
-                    return false;
+                return IntStringKey.EmptyStringKey;
             }
+
+            // starts with minus sign?
+            bool sign = false;
+            int index = 0;
+
+            // check first character:
+            switch (str[0])
+            {
+                case '-':
+                    // negative number starting with zero is always a string key (-0, -0123)
+                    if (str.Length == 1 || str[1] == '0')    // str = "-" or '-0' or '-0...'
+                        return new IntStringKey(str);
+
+                    // str = "-..." // continue to <int> parsing
+                    index = 1;
+                    sign = true;
+                    break;
+
+                case '0':
+                    // (non-negative) number starting with '0' is considered as a string,
+                    // iff there is more than just a '0'
+                    if (str.Length == 1)
+                        return new IntStringKey(0); // just a zero -> convert to int
+                    else
+                        return new IntStringKey(str);   // number starting with zero -> string key
+            }
+
+            Debug.Assert(index < str.Length, "str == {" + str + "}");
+
+            // simple <int> parser:
+            long result = (str[index] - '0');
+            Debug.Assert(result != 0, "str == {" + str + "}");
+
+            if (result < 0 || result > 9)   // not a number
+                return new IntStringKey(str);
+
+            while (++index < str.Length)
+            {
+                int c = str[index] - '0';
+                if (c >= 0 && c <= 9)
+                {
+                    // update <result>
+                    var previous = result;
+                    result = unchecked(c + result * 10);
+
+                    // overflow check
+                    if (previous <= result)
+                    {
+                        // did not overflow
+                        continue;
+                    }
+                }
+
+                //
+                return new IntStringKey(str);
+            }
+
+            if (sign)
+            {
+                result = unchecked(-result);
+
+                if (result > 0)
+                {
+                    // overflow
+                    return new IntStringKey(str);
+                }
+            }
+
+            // <int> parsed properly:
+            return new IntStringKey(result);
         }
 
         #endregion
@@ -289,6 +662,11 @@ namespace Pchp.Core
             /// The original object was PHP array. This has an effect on most PHP arithmetic operators.
             /// </summary>
             IsPhpArray = 256,
+
+            /// <summary>
+            /// The original value was a string.
+            /// </summary>
+            IsString = 512,
         }
 
         /// <summary>
@@ -350,11 +728,11 @@ namespace Pchp.Core
                 l = d = 0;
                 longValue = 0;
                 doubleValue = 0.0;
-                return NumberInfo.LongInteger;
+                return NumberInfo.LongInteger | NumberInfo.IsString;
             }
 
             // invariant after return: 0 <= i <= l <= d <= p <= old(p) + length - 1.
-            NumberInfo result = 0;
+            var result = NumberInfo.IsString;
 
             Debug.Assert(from >= 0);
             //if (from < 0) from = 0;
@@ -383,7 +761,7 @@ namespace Pchp.Core
             // patterns and states:
             // [:white:]*[+-]?0?[0-9]*[.]?[0-9]*([eE][+-]?[0-9]+)?
             //  0000000   11  2  222   2   333    4444  55   666     
-            // [:white:]*[+-]?0(x|X)[0-9A-Fa-f]*    // TODO: PHP does not resolve [+-] at the beginning, however Phalanger does
+            // [:white:]*[+-]?0(x|X)[0-9A-Fa-f]*    // TODO: PHP does not resolve [+-] at the beginning, however we do
             //  0000000   11  2 777  888888888  
 
             while (p < limit)
@@ -504,7 +882,7 @@ namespace Pchp.Core
                                 break;
                             }
 
-                            doubleValue = unchecked((double)longValue);
+                            doubleValue = longValue;
 
                             // unexpected character:
                             goto Done;
@@ -608,7 +986,7 @@ namespace Pchp.Core
                             {
                                 if (l == -1)
                                 {
-                                    if (longValue < Int64.MaxValue / 16 || (longValue == Int64.MaxValue / 16 && num <= Int64.MaxValue % 16))
+                                    if (longValue < long.MaxValue / 16 || (longValue == long.MaxValue / 16 && num <= long.MaxValue % 16))
                                     {
                                         longValue = longValue * 16 + num;
                                         break;
@@ -616,22 +994,22 @@ namespace Pchp.Core
                                     else
                                     {
                                         // last hexa long integer position:
-                                        doubleValue = unchecked((double)longValue);
+                                        doubleValue = longValue;
                                         if (sign)
                                         {
-                                            doubleValue = unchecked(-doubleValue);
-                                            longValue = Int64.MinValue;
+                                            doubleValue = -doubleValue;
+                                            longValue = long.MinValue;
                                         }
                                         else
                                         {
-                                            longValue = Int64.MaxValue;
+                                            longValue = long.MaxValue;
                                         }
                                         // fallback to double behaviour below...
                                     }
                                 }
 
                                 l = p;  // last position is advanced even the long is too long?
-                                doubleValue = unchecked(doubleValue * 16.0 + (double)num);
+                                doubleValue = doubleValue * 16.0 + num;
 
                                 break;
                             }
@@ -642,7 +1020,7 @@ namespace Pchp.Core
                 p++;
             }
 
-            Done:
+        Done:
 
             // an exponent ends with 'e', 'E', '-', or '+':
             if (state == 4 || state == 5)
@@ -664,12 +1042,12 @@ namespace Pchp.Core
                 if (sign)
                     longValue = unchecked(-longValue);
 
-                doubleValue = unchecked((double)longValue);
+                doubleValue = longValue;
             }
 
             //
             result |= NumberInfo.LongInteger;
-            
+
             // double parsing states
             if (state >= 3 && state <= 6)
             {
@@ -732,8 +1110,7 @@ namespace Pchp.Core
 		/// <exception cref="ArgumentNullException"><paramref name="str"/> is a <B>null</B> reference.</exception>
 		public static NumberInfo StringToNumber(string str, out long longValue, out double doubleValue)
         {
-            int l, d;
-            return IsNumber(str, (str != null) ? str.Length : 0, 0, out l, out d, out longValue, out doubleValue);
+            return IsNumber(str, (str != null) ? str.Length : 0, 0, out _, out _, out longValue, out doubleValue);
         }
 
         /// <summary>
@@ -743,11 +1120,7 @@ namespace Pchp.Core
         /// <returns>The result of conversion.</returns>
         public static long StringToLongInteger(string str)
         {
-            int l, d;
-            double dval;
-            long lval;
-            IsNumber(str, (str != null) ? str.Length : 0, 0, out l, out d, out lval, out dval);
-
+            IsNumber(str, (str != null) ? str.Length : 0, 0, out _, out _, out var lval, out _);
             return lval;
         }
 
@@ -758,12 +1131,15 @@ namespace Pchp.Core
         /// <returns>The result of conversion.</returns>
         public static double StringToDouble(string str)
         {
-            int l, d;
-            double dval;
-            long lval;
-            IsNumber(str, (str != null) ? str.Length : 0, 0, out l, out d, out lval, out dval);
-
-            return dval;
+            if (str != null)
+            {
+                IsNumber(str, str.Length, 0, out _, out _, out _, out var dval);
+                return dval;
+            }
+            else
+            {
+                return 0.0;
+            }
         }
 
         /// <summary>
@@ -778,10 +1154,7 @@ namespace Pchp.Core
         /// <returns>The integer stored in the <paramref name="str"/>.</returns>
         public static long SubstringToLongInteger(string str, int length, ref int position)
         {
-            int d;
-            long lval;
-            double dval;
-            IsNumber(str, position + length, position, out position, out d, out lval, out dval);
+            IsNumber(str, position + length, position, out position, out _, out var lval, out _);
 
             return lval;
         }
@@ -798,17 +1171,301 @@ namespace Pchp.Core
         /// <returns>The double stored in the <paramref name="str"/>.</returns>
         public static double SubstringToDouble(string/*!*/str, int length, ref int position)
         {
-            Debug.Assert(str != null && position + length <= str.Length);
+            Debug.Assert(str != null && position <= str.Length);
 
-            int l;
-            long lval;
-            double dval;
-            IsNumber(str, position + length, position, out l, out position, out lval, out dval);
+            // calculate max index the parse operation can reach
+            // note: {length} can be {Int.MaxValue} which would result in an overflow operation when added with {position}
+            int limit = length < str.Length ? Math.Min(str.Length, position + length) : str.Length;
+
+            IsNumber(str, limit, position, out _, out position, out _, out var dval);
 
             return dval;
         }
 
+        /// <summary>
+		/// Converts a substring to almost long integer in a specified base.
+		/// Stops parsing if result overflows unsigned integer.
+		/// </summary>
+		public static long SubstringToLongStrict(string str, int length, int @base, long maxValue, ref int position)
+        {
+            if (maxValue <= 0)
+                throw new ArgumentOutOfRangeException(nameof(maxValue));
+
+            if (@base < 2 || @base > 'Z' - 'A' + 1)
+            {
+                throw new ArgumentException(Resources.ErrResources.invalid_base, nameof(@base));
+            }
+
+            if (str == null) str = "";
+            if (position < 0) position = 0;
+            if (length < 0 || length > str.Length - position) length = str.Length - position;
+            if (length == 0) return 0;
+
+            long result = 0;
+            int sign = +1;
+
+            // reads a sign:
+            if (str[position] == '+')
+            {
+                position++;
+                length--;
+            }
+            else if (str[position] == '-')
+            {
+                position++;
+                length--;
+                sign = -1;
+            }
+
+            long max_div, max_rem;
+            max_div = Utilities.NumberUtils.DivRem(maxValue, @base, out max_rem);
+
+            while (length-- > 0)
+            {
+                int digit = AlphaNumericToDigit(str[position]);
+                if (digit >= @base) break;
+
+                if (!(result < max_div || (result == max_div && digit <= max_rem)))
+                {
+                    // reads remaining digits:
+                    while (length-- > 0 && AlphaNumericToDigit(str[position]) < @base) position++;
+
+                    return (sign == -1) ? Int64.MinValue : Int64.MaxValue;
+                }
+
+                result = result * @base + digit;
+                position++;
+            }
+
+            return result * sign;
+        }
+
+        /// <summary>
+        /// Helper method that constructs an integer from leading digits starting at s[offset].  "offset" is
+        /// updated to contain an offset just beyond the last digit.  The number of digits consumed is returned in
+        /// cntDigits.  The integer is returned (0 if no digits).  If the digits cannot fit into an Int32:
+        ///   1. If eatDigits is true, then additional digits will be silently discarded (don't count towards numDigits)
+        ///   2. If eatDigits is false, an overflow exception is thrown
+        /// </summary>
+        public static bool TryParseDigits(ReadOnlySpan<char> s, ref int offset, bool eatDigits, out int result, out int numDigits)
+        {
+            Debug.Assert(offset >= 0);
+
+            int offsetStart = offset;
+
+            result = 0;
+            numDigits = 0;
+
+            while (offset < s.Length && s[offset] >= '0' && s[offset] <= '9')
+            {
+                var digit = s[offset] - '0';
+
+                if (result > (int.MaxValue - digit) / 10)
+                {
+                    if (!eatDigits)
+                    {
+                        // overflow
+                        //return false;
+                        throw new OverflowException();
+                    }
+
+                    // Skip past any remaining digits
+                    numDigits = offset - offsetStart;
+
+                    while (offset < s.Length && s[offset] >= '0' && s[offset] <= '9')
+                    {
+                        offset++;
+                    }
+
+                    return true;
+                }
+
+                result = result * 10 + digit;
+                offset++;
+            }
+
+            numDigits = offset - offsetStart;
+            return true;
+        }
+
         #endregion
+
+        #region ToDateTime
+
+        /// <summary>
+        /// Converts a value to <see cref="DateTime"/>.
+        /// Supports
+        /// - implicit conversions from an object (like PHP <c>DateTime</c>)
+        /// - conversions from <see cref="string"/>.
+        /// </summary>
+        /// <exception cref="InvalidCastException">When an unsupported value is used.</exception>
+        public static DateTime ToDateTime(this PhpValue value)
+        {
+            switch (value.TypeCode)
+            {
+                case PhpTypeCode.Object:
+                    var m = Dynamic.ConvertExpression.FindImplicitOperator(value.Object.GetType(), typeof(DateTime));
+                    if (m != null)
+                    {
+                        return (DateTime)m.Invoke(null, new[] { value.Object });
+                    }
+
+                    goto default;
+
+                case PhpTypeCode.MutableString:
+                    return DateTime.Parse(value.MutableStringBlob.ToString());
+
+                case PhpTypeCode.String:
+                    return DateTime.Parse(value.String);
+
+                case PhpTypeCode.Alias:
+                    return ToDateTime(value.Alias.Value);
+
+                default:
+                    throw new InvalidCastException();
+            }
+        }
+
+        #endregion
+    }
+
+    #endregion
+
+    #region StrictConvert
+
+    /// <summary>
+    /// Strict type conversion operations.
+    /// Throws an exception if type does not match and numeric conversion does not exist.
+    /// </summary>
+    [DebuggerNonUserCode]
+    //[DebuggerStepperBoundary]
+    public static class StrictConvert
+    {
+        public static long ToLong(string value)
+        {
+            if (value != null && (Convert.IsNumber(value, value.Length, 0, out _, out _, out var longValue, out _) & Convert.NumberInfo.IsNumber) != 0)
+            {
+                // Notice: A non well formed numeric value encountered
+                return longValue;
+            }
+
+            // TypeError: must be of the type int, null given
+            throw PhpException.TypeErrorException();
+        }
+
+        public static long ToLong(PhpString value) => ToLong(value.ToString());
+
+        public static long ToLong(PhpAlias alias) => ToLong(alias.Value);
+
+        public static long ToLong(PhpValue value)
+        {
+            switch (value.TypeCode)
+            {
+                case PhpTypeCode.Long: return value.Long;
+
+                case PhpTypeCode.Double: return (long)value.Double;
+
+                case PhpTypeCode.Boolean: return value.Boolean ? 1L : 0L;
+
+                case PhpTypeCode.String: return ToLong(value.String);
+
+                case PhpTypeCode.MutableString: return ToLong(value.MutableStringBlob.ToString());
+
+                //case PhpTypeCode.Object:
+                //    return (value.Object is IPhpConvertible convertible)
+                //        ? convertible.ToLong()
+                //        : throw PhpException.TypeErrorException(string.Format(Resources.ErrResources.object_could_not_be_converted, value.Object.GetPhpTypeInfo().Name, PhpVariable.TypeNameInt));
+
+                case PhpTypeCode.Alias: return ToLong(value.Alias.Value);
+
+                default:
+                    // TypeError: must be of the type int, null given
+                    throw PhpException.TypeErrorException();
+            }
+        }
+
+        public static double ToDouble(string value)
+        {
+            if (value != null && (Convert.IsNumber(value, value.Length, 0, out _, out _, out var _, out var doubleValue) & Convert.NumberInfo.IsNumber) != 0)
+            {
+                // Notice: A non well formed numeric value encountered
+                return doubleValue;
+            }
+
+            // TypeError: must be of the type int, null given
+            throw PhpException.TypeErrorException();
+        }
+
+        /// <summary>
+        /// Explicit conversion to <see cref="double"/>.
+        /// </summary>
+        public static double ToDouble(PhpValue value)
+        {
+            switch (value.TypeCode)
+            {
+                case PhpTypeCode.Long: return value.Long;
+
+                case PhpTypeCode.Double: return value.Double;
+
+                case PhpTypeCode.Boolean: return value.Boolean ? 1 : 0;
+
+                case PhpTypeCode.String: return ToDouble(value.String);
+
+                case PhpTypeCode.MutableString: return ToDouble(value.MutableStringBlob.ToString());
+
+                //case PhpTypeCode.Object:
+                //    return (value.Object is IPhpConvertible convertible)
+                //        ? convertible.ToLong()
+                //        : throw PhpException.TypeErrorException(string.Format(Resources.ErrResources.object_could_not_be_converted, value.Object.GetPhpTypeInfo().Name, PhpVariable.TypeNameInt));
+
+                case PhpTypeCode.Alias: return ToDouble(value.Alias.Value);
+
+                default:
+                    // TypeError: must be of the type int, null given
+                    throw PhpException.TypeErrorException();
+            }
+        }
+
+        public static PhpArray ToArray(PhpValue value) => value.TypeCode switch
+        {
+            PhpTypeCode.PhpArray => value.Array,
+            PhpTypeCode.Alias => ToArray(value.Alias.Value),
+            PhpTypeCode.Null => null,
+            _ => throw PhpException.TypeErrorException(),
+        };
+
+        /// <summary>
+        /// Gets value as a string or throws <c>TypeError</c> exception.
+        /// </summary>
+        public static string ToString(PhpValue value, Context ctx) => value.TypeCode switch
+        {
+            PhpTypeCode.Null => null, // TODO: support nullable conversion, target parameter can be either `string` or `string?`
+            PhpTypeCode.Boolean => Convert.ToString(value.Boolean),
+            PhpTypeCode.Long => Convert.ToString(value.Long),
+            PhpTypeCode.Double => Convert.ToString(value.Double),
+            PhpTypeCode.String => value.String,
+            PhpTypeCode.MutableString => value.MutableStringBlob.ToString(ctx.StringEncoding),
+            PhpTypeCode.Object => Convert.ToString(value.Object),
+            PhpTypeCode.Alias => ToString(value.Alias.Value, ctx),
+            _ => throw PhpException.TypeErrorException(),
+        };
+
+        public static string ToString(object obj)
+        {
+            if (obj == null)
+            {
+                throw PhpException.TypeErrorException();
+            }
+
+            return Convert.ToString(obj);
+        }
+
+        /// <summary>
+        /// Unconvertible.
+        /// Throws <c>TypeError</c> exception.
+        /// </summary>
+        // [FatalError]
+        public static string ToString(PhpArray _) => throw PhpException.TypeErrorException();
     }
 
     #endregion

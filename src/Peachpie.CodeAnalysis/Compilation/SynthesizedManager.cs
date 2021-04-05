@@ -1,11 +1,14 @@
 ﻿using Microsoft.CodeAnalysis;
 using Pchp.CodeAnalysis.Symbols;
+using Roslyn.Utilities;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading.Tasks;
+using Cci = Microsoft.Cci;
 
 namespace Pchp.CodeAnalysis.Emit
 {
@@ -18,7 +21,7 @@ namespace Pchp.CodeAnalysis.Emit
 
         public PhpCompilation DeclaringCompilation => _module.Compilation;
 
-        readonly Dictionary<TypeSymbol, List<Symbol>> _membersByType = new Dictionary<TypeSymbol, List<Symbol>>();
+        readonly ConcurrentDictionary<Cci.ITypeDefinition, List<Symbol>> _membersByType = new ConcurrentDictionary<Cci.ITypeDefinition, List<Symbol>>();
 
         public SynthesizedManager(PEModuleBuilder module)
         {
@@ -29,22 +32,31 @@ namespace Pchp.CodeAnalysis.Emit
 
         #region Synthesized Members
 
-        List<Symbol> EnsureList(TypeSymbol type)
+        List<Symbol> EnsureList(Cci.ITypeDefinition type)
         {
-            List<Symbol> list;
-            if (!_membersByType.TryGetValue(type, out list))
-            {
-                _membersByType[type] = list = new List<Symbol>();
-            }
+            return _membersByType.GetOrAdd(type, (_) => new List<Symbol>());
+        }
 
-            //
-            return list;
+        void AddMember(Cci.ITypeDefinition type, Symbol member)
+        {
+            var members = EnsureList(type);
+            lock (members)
+            {
+                if (members.IndexOf(member) < 0)
+                {
+                    members.Add(member);
+                }
+                else
+                {
+                    Debug.Fail("Member added twice!");
+                }
+            }
         }
 
         /// <summary>
         /// Gets or initializes static constructor symbol.
         /// </summary>
-        public MethodSymbol/*!*/EnsureStaticCtor(TypeSymbol container)
+        public MethodSymbol/*!*/EnsureStaticCtor(Cci.ITypeDefinition container)
         {
             Contract.ThrowIfNull(container);
 
@@ -59,34 +71,48 @@ namespace Pchp.CodeAnalysis.Emit
 
             //
             var members = EnsureList(container);
-
-            //
-            var cctor = members.OfType<SynthesizedCctorSymbol>().FirstOrDefault();
-            if (cctor == null)
+            lock (members)
             {
-                cctor = new SynthesizedCctorSymbol(container);
-                members.Add(cctor);
+                //
+                var cctor = members.OfType<SynthesizedCctorSymbol>().FirstOrDefault();
+                if (cctor == null)
+                {
+                    cctor = new SynthesizedCctorSymbol(container, DeclaringCompilation.SourceModule);
+                    members.Add(cctor);
+                }
+                return cctor;
             }
 
             //
-            return cctor;
         }
 
         /// <summary>
         /// Creates synthesized field.
         /// </summary>
-        public SynthesizedFieldSymbol/*!*/GetOrCreateSynthesizedField(NamedTypeSymbol container, TypeSymbol type, string name, Accessibility accessibility, bool isstatic, bool @readonly)
+        public SynthesizedFieldSymbol/*!*/GetOrCreateSynthesizedField(NamedTypeSymbol container, TypeSymbol type, string name, Accessibility accessibility, bool isstatic, bool @readonly, bool autoincrement = false)
         {
+            SynthesizedFieldSymbol field = null;
+
             var members = EnsureList(container);
-
-            var field = members
-                .OfType<SynthesizedFieldSymbol>()
-                .FirstOrDefault(f => f.Name == name && f.IsStatic == isstatic && f.Type == type && f.IsReadOnly == @readonly);
-
-            if (field == null)
+            lock (members)
             {
-                field = new SynthesizedFieldSymbol(container, type, name, accessibility, isstatic, @readonly);
-                members.Add(field);
+                if (autoincrement)
+                {
+                    name += "?" + members.Count.ToString("x");
+                }
+
+                if (!autoincrement)
+                {
+                    field = members
+                        .OfType<SynthesizedFieldSymbol>()
+                        .FirstOrDefault(f => f.Name == name && f.IsStatic == isstatic && f.Type == type && f.IsReadOnly == @readonly);
+                }
+
+                if (field == null)
+                {
+                    field = new SynthesizedFieldSymbol(container, type, name, accessibility, isstatic, @readonly);
+                    members.Add(field);
+                }
             }
 
             Debug.Assert(field.IsImplicitlyDeclared);
@@ -99,33 +125,55 @@ namespace Pchp.CodeAnalysis.Emit
         /// </summary>
         /// <param name="container">Containing type.</param>
         /// <param name="nestedType">Type to be added as nested type.</param>
-        public void AddNestedType(TypeSymbol container, NamedTypeSymbol nestedType)
+        public void AddNestedType(Cci.ITypeDefinition container, NamedTypeSymbol nestedType)
         {
             Contract.ThrowIfNull(nestedType);
             Debug.Assert(nestedType.IsImplicitlyDeclared);
-            Debug.Assert(container.ContainingType == null); // can't nest in nested type
+            Debug.Assert((container as ISymbol)?.ContainingType == null); // can't nest in nested type
 
-            EnsureList(container).Add(nestedType);
+            AddMember(container, nestedType);
         }
 
         /// <summary>
-        /// Adds a synthedized method to the class.
+        /// Adds a synthesized method to the class.
         /// </summary>
-        public void AddMethod(TypeSymbol container, MethodSymbol method)
+        public void AddMethod(Cci.ITypeDefinition container, MethodSymbol method)
         {
             Contract.ThrowIfNull(method);
             Debug.Assert(method.IsImplicitlyDeclared);
 
-            EnsureList(container).Add(method);
+            AddMember(container, method);
+        }
+
+        /// <summary>
+        /// Adds a synthesized property to the class.
+        /// </summary>
+        public void AddProperty(Cci.ITypeDefinition container, PropertySymbol property)
+        {
+            Contract.ThrowIfNull(property);
+
+            AddMember(container, property);
+        }
+
+        /// <summary>
+        /// Adds a synthesized symbol to the class.
+        /// </summary>
+        public void AddField(Cci.ITypeDefinition container, FieldSymbol field)
+        {
+            AddMember(container, field);
         }
 
         /// <summary>
         /// Gets synthezised members contained in <paramref name="container"/>.
         /// </summary>
+        /// <remarks>
+        /// This method is not thread-safe, it is expected to be called after all
+        /// the synthesized members were added to <paramref name="container"/>.
+        /// </remarks>
         /// <typeparam name="T">Type of members to enumerate.</typeparam>
         /// <param name="container">Containing type.</param>
         /// <returns>Enumeration of synthesized type members.</returns>
-        public IEnumerable<T> GetMembers<T>(TypeSymbol container) where T : ISymbol
+        public IEnumerable<T> GetMembers<T>(Cci.ITypeDefinition container) where T : ISymbol
         {
             List<Symbol> list;
             if (_membersByType.TryGetValue(container, out list) && list.Count != 0)
@@ -134,8 +182,21 @@ namespace Pchp.CodeAnalysis.Emit
             }
             else
             {
-                return ImmutableArray<T>.Empty;
+                return SpecializedCollections.EmptyEnumerable<T>();
             }
+        }
+
+        /// <summary>
+        /// Gets or creates internal static int field as index holder for a global constant.
+        /// </summary>
+        public SynthesizedFieldSymbol/*!*/GetGlobalConstantIndexField(string cname)
+        {
+            return GetOrCreateSynthesizedField(
+                    _module.ScriptType,
+                    DeclaringCompilation.GetSpecialType(SpecialType.System_Int32),
+                    "<const>" + cname,
+                    Accessibility.Internal, true, false,
+                    autoincrement: false);
         }
 
         #endregion

@@ -1,91 +1,62 @@
-﻿using Pchp.Core.Reflection;
-using System;
-using System.Collections.Generic;
+﻿using System;
 using System.Diagnostics;
 using System.Dynamic;
 using System.Linq;
 using System.Linq.Expressions;
-using System.Reflection;
-using System.Text;
-using System.Threading.Tasks;
+using Pchp.CodeAnalysis.Semantics;
+using Pchp.Core.Reflection;
 
 namespace Pchp.Core.Dynamic
 {
-    public class SetFieldBinder : DynamicMetaObjectBinder
+    class SetFieldBinder : DynamicMetaObjectBinder
     {
         readonly string _name;
         readonly Type _classContext;
-        readonly AccessFlags _access;
+        readonly AccessMask _access;
 
-        public SetFieldBinder(string name, RuntimeTypeHandle classContext, AccessFlags access)
+        public SetFieldBinder(string name, RuntimeTypeHandle classContext, AccessMask access)
         {
             _name = name;
             _classContext = Type.GetTypeFromHandle(classContext);
-            _access = access;
-        }
-
-        void ResolveArgs(DynamicMetaObject[] args, ref BindingRestrictions restrictions, out string fieldName, out Expression valueExpr)
-        {
-            if (_name != null)
-            {
-                fieldName = _name;
-                valueExpr = (args.Length > 0) ? args[0].Expression : null;
-            }
-            else
-            {
-                Debug.Assert(args.Length >= 1 && args[0].LimitType == typeof(string));
-                restrictions = restrictions.Merge(BindingRestrictions.GetExpressionRestriction(Expression.Equal(args[0].Expression, Expression.Constant(args[0].Value)))); // args[0] == "VALUE"
-                fieldName = (string)args[0].Value;
-                valueExpr = (args.Length > 1) ? args[1].Expression : null;
-            }
+            _access = access & AccessMask.WriteMask;
         }
 
         public override DynamicMetaObject Bind(DynamicMetaObject target, DynamicMetaObject[] args)
         {
-            var restrictions = BindingRestrictions.Empty;
-            
-            Expression target_expr;
-            PhpTypeInfo phptype;
+            bool hasTargetInstance = (target.LimitType != typeof(TargetTypeParam));
 
-            //
-            string fldName;
-            Expression value;
-
-            ResolveArgs(args, ref restrictions, out fldName, out value);
-
-            //
-            if (target.LimitType == typeof(PhpTypeInfo))    // static field
+            var bound = new CallSiteContext(!hasTargetInstance)
             {
-                target_expr = null;
-                phptype = (PhpTypeInfo)target.Value;
+                ClassContext = _classContext,
+                Name = _name,
             }
-            else
+            .ProcessArgs(target, args, hasTargetInstance);
+
+            //
+            if (hasTargetInstance)
             {
-                object target_value;
-                BinderHelpers.TargetAsObject(target, out target_expr, out target_value, ref restrictions);
-
-                var runtime_type = target_value.GetType();
-
-                // 
-                if (target_expr.Type != runtime_type)
+                var isobject = bound.TargetType != null;
+                if (isobject == false)
                 {
-                    restrictions = restrictions.Merge(BindingRestrictions.GetTypeRestriction(target_expr, runtime_type));
-                    target_expr = Expression.Convert(target_expr, runtime_type);
+                    // VariableMisusedAsObject
+                    return new DynamicMetaObject(
+                        BinderHelpers.VariableMisusedAsObject(target.Expression, false),
+                        bound.Restrictions);
                 }
 
-                phptype = runtime_type.GetPhpTypeInfo();
+                // instance := (T)instance
+                bound.TargetInstance = Expression.Convert(bound.TargetInstance, bound.TargetType.Type.AsType());
             }
 
             //
-            var setter = BinderHelpers.BindField(phptype, _classContext, target_expr, fldName, null, _access, value);
-            if (setter != null)
+            var setter = BinderHelpers.BindField(bound.TargetType, bound.ClassContext, bound.TargetInstance, bound.Name, bound.Context, _access, bound.Arguments.FirstOrDefault());
+            if (setter == null)
             {
-                //
-                return new DynamicMetaObject(setter, restrictions);
+                // unexpected
+                throw new InvalidOperationException();
             }
 
-            // field not found
-            throw new NotImplementedException();
+            return new DynamicMetaObject(setter, bound.Restrictions);
         }
     }
 }

@@ -118,18 +118,18 @@ namespace Pchp.Library.Streams
         /// <param name="ctx">Current runtime context.</param>
         /// <param name="path">URI or filename of the resource to be opened</param>
         /// <param name="mode">File access mode</param>
-        /// <returns></returns>
-        internal static PhpStream Open(Context ctx, string path, StreamOpenMode mode)
+        /// <returns>The stream or <c>null</c> in case of error.</returns>
+        public static PhpStream Open(Context ctx, string path, StreamOpenMode mode)
         {
-            string modeStr = null;
-            switch (mode)
+            var modeStr = mode switch
             {
-                case StreamOpenMode.ReadBinary: modeStr = "rb"; break;
-                case StreamOpenMode.WriteBinary: modeStr = "wb"; break;
-                case StreamOpenMode.ReadText: modeStr = "rt"; break;
-                case StreamOpenMode.WriteText: modeStr = "wt"; break;
-            }
-            Debug.Assert(modeStr != null);
+                StreamOpenMode.ReadBinary => "rb",
+                StreamOpenMode.WriteBinary => "wb",
+                StreamOpenMode.ReadText => "rt",
+                StreamOpenMode.WriteText => "wt",
+                _ => throw new ArgumentException(nameof(mode)),
+            };
+
             return Open(ctx, path, modeStr, StreamOpenOptions.Empty, StreamContext.Default);
         }
 
@@ -156,21 +156,21 @@ namespace Pchp.Library.Streams
             {
                 // No scheme, no root directory, it's a relative path.
                 filename = path;
-                return "file";
+                return FileStreamWrapper.scheme;
             }
 
             if (Path.IsPathRooted(path))
             {
                 // It already is an absolute path.
                 filename = path;
-                return "file";
+                return FileStreamWrapper.scheme;
             }
 
             if (path.Length < colon_index + 3 || path[colon_index + 1] != '/' || path[colon_index + 2] != '/')
             {
                 // There is no "//" following the colon.
                 filename = path;
-                return "file";
+                return FileStreamWrapper.scheme;
             }
 
             // Otherwise it is an URL (including file://), set the filename and return the scheme.
@@ -190,16 +190,20 @@ namespace Pchp.Library.Streams
         public static PhpStream Open(Context ctx, string path, string mode, StreamOpenOptions options, StreamContext context)
         {
             if (context == null)
-                throw new ArgumentNullException("context");
+            {
+                throw new ArgumentNullException(nameof(context));
+            }
 
             Debug.Assert(ctx != null);
 
-            StreamWrapper wrapper;
-            if (!PhpStream.ResolvePath(ctx, ref path, out wrapper, CheckAccessMode.FileMayExist, (CheckAccessOptions)options))
+            if (ResolvePath(ctx, ref path, out var wrapper, CheckAccessMode.FileMayExist, (CheckAccessOptions)options))
+            {
+                return wrapper.Open(ctx, ref path, mode, options, context);
+            }
+            else
+            {
                 return null;
-
-            return wrapper.Open(ctx, ref path, mode, options, context);
-
+            }
         }
 
         #endregion
@@ -225,25 +229,28 @@ namespace Pchp.Library.Streams
         public static bool ResolvePath(Context ctx, ref string path, out StreamWrapper wrapper, CheckAccessMode mode, CheckAccessOptions options)
         {
             // Path will contain the absolute path without file:// or the complete URL; filename is the relative path.
-            string filename, scheme = GetSchemeInternal(path, out filename);
-            wrapper = StreamWrapper.GetWrapper(ctx, scheme, (StreamOptions)options);
-            if (wrapper == null) return false;
+            var scheme = GetSchemeInternal(path, out var filename);
 
-            if (wrapper.IsUrl)
+            wrapper = StreamWrapper.GetWrapper(ctx, scheme, (StreamOptions)options);
+
+            if (wrapper == null)
+            {
+                return false;
+            }
+            else if (wrapper.IsUrl)
             {
                 // Note: path contains the whole URL, filename the same without the scheme:// portion.
                 // What to check more?
+                wrapper.ResolvePath(ctx, ref path);
             }
             else if (scheme != "php")
             {
+                // TODO: move following to StreamWrapper.ResolvePath()
+
                 try
                 {
                     // Filename contains the original path without the scheme:// portion, check for include path.
-                    bool isInclude = false;
-                    if ((options & CheckAccessOptions.UseIncludePath) > 0)
-                    {
-                        isInclude = CheckIncludePath(ctx, filename, ref path);
-                    }
+                    var isInclude = (options & CheckAccessOptions.UseIncludePath) != 0 && CheckIncludePath(ctx, filename, ref path);
 
                     // Path will now contain an absolute path (either to an include or actual directory).
                     if (!isInclude)
@@ -254,7 +261,9 @@ namespace Pchp.Library.Streams
                 catch (System.Exception)
                 {
                     if ((options & CheckAccessOptions.Quiet) == 0)
+                    {
                         PhpException.Throw(PhpError.Warning, ErrResources.stream_filename_invalid, FileSystemUtils.StripPassword(path));
+                    }
                     return false;
                 }
 
@@ -277,9 +286,9 @@ namespace Pchp.Library.Streams
                     string.Format("'{0}' should not contain '{1}' char.", path, Path.AltDirectorySeparatorChar));
 
                 // The file wrapper expects an absolute path w/o the scheme, others expect the scheme://url.
-                if (scheme != "file")
+                if (scheme != FileStreamWrapper.scheme)
                 {
-                    path = String.Format("{0}://{1}", scheme, path);
+                    path = $"{scheme}://{path}";
                 }
             }
 
@@ -301,19 +310,23 @@ namespace Pchp.Library.Streams
             if (Path.IsPathRooted(relativePath)) return false;
             if (File.Exists(absolutePath)) return false;
 
-            var paths = ctx.IncludePaths;
-            if (paths == null || paths.Length == 0) return false;
+            // TODO: use Core.Context.TryResolveScript()
 
-            foreach (string s in paths)
+            var paths = ctx.IncludePaths;
+            if (paths != null && paths.Length != 0)
             {
-                if (string.IsNullOrEmpty(s)) continue;
-                string abs = Path.GetFullPath(Path.Combine(s, relativePath));
-                if (File.Exists(abs))
+                foreach (var s in paths)
                 {
-                    absolutePath = abs;
-                    return true;
+                    if (string.IsNullOrEmpty(s)) continue;
+                    var abs = Path.GetFullPath(Path.Combine(s, relativePath));
+                    if (File.Exists(abs))
+                    {
+                        absolutePath = abs;
+                        return true;
+                    }
                 }
             }
+
             return false;
         }
 
@@ -373,7 +386,7 @@ namespace Pchp.Library.Streams
                     break;
 
                 case CheckAccessMode.FileOrDirectory:
-                    if ((!Directory.Exists(filename)) && (!File.Exists(filename)))
+                    if ((!System.IO.Directory.Exists(filename)) && (!File.Exists(filename)))
                     {
                         if (!quiet) PhpException.Throw(PhpError.Warning, ErrResources.stream_path_not_exists, url);
                         return false;
@@ -381,7 +394,7 @@ namespace Pchp.Library.Streams
                     break;
 
                 case CheckAccessMode.Directory:
-                    if (!Directory.Exists(filename))
+                    if (!System.IO.Directory.Exists(filename))
                     {
                         if (!quiet) PhpException.Throw(PhpError.Warning, ErrResources.stream_directory_not_exists, url);
                         return false;
@@ -409,18 +422,18 @@ namespace Pchp.Library.Streams
         /// This class newly implements the auto-remove behavior too
         /// (see <see cref="StreamAccessOptions.Temporary"/>).
         /// </remarks>
-        /// <param name="ctx">Runtime context.</param>
+        /// <param name="enc_provider">Runtime string encoding provider.</param>
         /// <param name="openingWrapper">The parent instance.</param>
         /// <param name="accessOptions">The additional options parsed from the <c>fopen()</c> mode.</param>
         /// <param name="openedPath">The absolute path to the opened resource.</param>
         /// <param name="context">The stream context passed to fopen().</param>
-        public PhpStream(Context ctx, StreamWrapper openingWrapper, StreamAccessOptions accessOptions, string openedPath, StreamContext context)
+        public PhpStream(IEncodingProvider enc_provider, StreamWrapper openingWrapper, StreamAccessOptions accessOptions, string openedPath, StreamContext context)
             : base(PhpStreamTypeName)
         {
-            Debug.Assert(ctx != null);
+            Debug.Assert(enc_provider != null);
             Debug.Assert(context != null);
 
-            _ctx = ctx;
+            _encoding = enc_provider;
             _context = context;
 
             this.Wrapper = openingWrapper;
@@ -442,7 +455,9 @@ namespace Pchp.Library.Streams
                 }
             }
 
-            // this.readTimeout = ScriptContext.CurrentContext.Config.FileSystem.DefaultSocketTimeout;
+            this.readTimeout = (enc_provider is Context ctx)    // NOTE: provider is Context, this remains here for historical reasons, refactor if you don't like it
+                ? ctx.Configuration.Core.DefaultSocketTimeout
+                : 60;
         }
 
         /// <summary>
@@ -705,7 +720,7 @@ namespace Pchp.Library.Streams
                 if (textReadFilter != null)
                 {
                     // First use the text-input filter if any.
-                    filtered = textReadFilter.Filter(_ctx, filtered, closing);
+                    filtered = textReadFilter.Filter(_encoding, filtered, closing);
                 }
 
                 if (readFilters != null)
@@ -719,7 +734,7 @@ namespace Pchp.Library.Streams
                             if (closing) filtered = TextElement.Empty;
                             else break; // Continue with next RawRead()
                         }
-                        filtered = f.Filter(_ctx, filtered, closing);
+                        filtered = f.Filter(_encoding, filtered, closing);
                     } // foreach
                 } // if
             } // while 
@@ -743,7 +758,6 @@ namespace Pchp.Library.Streams
             readBuffers.Enqueue(data);
         }
 
-
         /// <summary>
         /// Remove the (entirely consumed) read buffer from the head of the read buffer queue.
         /// </summary>
@@ -761,9 +775,8 @@ namespace Pchp.Library.Streams
             readOffset += length;
 
             readPosition = 0;
-            return readBuffers.Count > 0;
+            return readBuffers.Count != 0;
         }
-
 
         /// <summary>
         /// Joins the read buffers to get at least <paramref name="length"/> characters
@@ -780,7 +793,7 @@ namespace Pchp.Library.Streams
         {
             if (length == 0) return string.Empty;
 
-            string peek = readBuffers.Peek().AsText(_ctx.StringEncoding);
+            string peek = readBuffers.Peek().AsText(_encoding.StringEncoding);
             if (peek == null) throw new InvalidOperationException(ErrResources.buffers_must_not_be_empty);
             Debug.Assert(peek.Length >= readPosition);
 
@@ -808,7 +821,7 @@ namespace Pchp.Library.Streams
 
                 while (length > 0)
                 {
-                    peek = readBuffers.Peek().AsText(_ctx.StringEncoding);
+                    peek = readBuffers.Peek().AsText(_encoding.StringEncoding);
                     if (peek == null) throw new InvalidOperationException(ErrResources.too_little_data_buffered);
                     if (peek.Length > length)
                     {
@@ -836,7 +849,6 @@ namespace Pchp.Library.Streams
             } // else
         }
 
-
         /// <summary>
         /// Joins the read buffers to get at least <paramref name="length"/> bytes
         /// in a <see cref="PhpBytes"/>. 
@@ -847,13 +859,15 @@ namespace Pchp.Library.Streams
         {
             if (length == 0) return ArrayUtils.EmptyBytes;
 
-            byte[] peek = readBuffers.Peek().AsBytes(_ctx.StringEncoding);
+            byte[] peek = readBuffers.Peek().AsBytes(_encoding.StringEncoding);
             Debug.Assert(peek.Length >= readPosition);
+
+            //
+            byte[] data = new byte[length];
 
             if (peek.Length - readPosition >= length)
             {
                 // Great! We can just take a sub-data.
-                byte[] data = new byte[length];
                 Array.Copy(peek, readPosition, data, 0, length);
                 readPosition += length;
 
@@ -870,7 +884,7 @@ namespace Pchp.Library.Streams
                 // Start building the data from the remainder in the buffer.
                 int buffered = this.ReadBufferLength;
                 if (buffered < length) length = buffered;
-                byte[] data = new byte[length];
+
                 int copied = peek.Length - readPosition;
                 Array.Copy(peek, readPosition, data, 0, copied); readPosition += copied;
                 length -= copied;
@@ -880,7 +894,7 @@ namespace Pchp.Library.Streams
 
                 while (length > 0)
                 {
-                    peek = readBuffers.Peek().AsBytes(_ctx.StringEncoding);
+                    peek = readBuffers.Peek().AsBytes(_encoding.StringEncoding);
                     if (peek.Length > length)
                     {
                         // This data is long enough. It is the last one.
@@ -906,9 +920,7 @@ namespace Pchp.Library.Streams
                 Debug.Assert(copied > 0);
                 if (copied < length)
                 {
-                    byte[] sub = new byte[copied];
-                    Array.Copy(data, 0, sub, 0, copied);
-                    return sub;
+                    Array.Resize(ref data, copied);
                 }
                 return data;
             } // else
@@ -1044,7 +1056,7 @@ namespace Pchp.Library.Streams
                     done = filteredLength > 0;
                     readFilteredCount += filteredLength;
 
-                    if (length < 0)
+                    if (ending)
                     {
                         // If the data contains the EOLN, store the rest into the buffers, otherwise return the whole packet.
                         int eoln = FindEoln(packet, 0);
@@ -1083,7 +1095,7 @@ namespace Pchp.Library.Streams
             else
             {
                 // There is not enough data in the buffers, read more.
-                for (;;)
+                for (; ; )
                 {
                     data = ReadFiltered(readChunkSize);
                     if (data.IsNull)
@@ -1135,7 +1147,7 @@ namespace Pchp.Library.Streams
                 return new TextElement(ReadTextBuffer(length));
             else
                 return new TextElement(ReadBinaryBuffer(length));
-            // Data may only be a string or PhpBytes (and consistently throughout all the buffers).
+            // Data may only be a string or byte[] (and consistently throughout all the buffers).
         }
 
         /// <summary>
@@ -1149,7 +1161,7 @@ namespace Pchp.Library.Streams
         {
             Debug.Assert(this.IsBinary);
             // Data may only be a string or PhpBytes.
-            return ReadData(length, false).AsBytes(_ctx.StringEncoding);
+            return ReadData(length, false).AsBytes(_encoding.StringEncoding);
         }
 
         /// <summary>
@@ -1163,7 +1175,7 @@ namespace Pchp.Library.Streams
         {
             Debug.Assert(this.IsText);
             // Data may only be a string or PhpBytes.
-            return ReadData(length, false).AsText(_ctx.StringEncoding);
+            return ReadData(length, false).AsText(_encoding.StringEncoding);
         }
 
         /// <summary>
@@ -1246,6 +1258,31 @@ namespace Pchp.Library.Streams
             }
         }
 
+        /// <summary>
+        /// Splits a <see cref="string"/> to "upto" bytes at left, ignores "separator" and the rest or <c>null</c> at right.
+        /// </summary>
+        static void SplitStringAt(string str, int upto, int separator, out string left, out string right)
+        {
+            if (upto < str.Length)
+            {
+                left = str.Remove(upto);
+
+                if (upto + separator < str.Length)
+                {
+                    right = str.Substring(upto + separator);
+                }
+                else
+                {
+                    right = null;
+                }
+            }
+            else
+            {
+                left = str;
+                right = null;
+            }
+        }
+
         #endregion
 
         #region Maximum Block Reading
@@ -1302,7 +1339,7 @@ namespace Pchp.Library.Streams
         /// <returns>A <see cref="byte"/>[] containing data read from the stream.</returns>
         public byte[] ReadMaximumBytes()
         {
-            return ReadMaximumData().AsBytes(_ctx.StringEncoding);
+            return ReadMaximumData().AsBytes(_encoding.StringEncoding);
         }
 
         /// <summary>
@@ -1311,7 +1348,7 @@ namespace Pchp.Library.Streams
         /// <returns>A <see cref="string"/> containing data read from the stream.</returns>
         public string ReadMaximumString()
         {
-            return ReadMaximumData().AsText(_ctx.StringEncoding);
+            return ReadMaximumData().AsText(_encoding.StringEncoding);
         }
 
         #endregion
@@ -1335,7 +1372,7 @@ namespace Pchp.Library.Streams
         public string ReadStringContents(int maxLength)
         {
             if (!CanRead) return null;
-            StringBuilder result = new StringBuilder();
+            var result = StringBuilderUtilities.Pool.Get();
 
             if (maxLength >= 0)
             {
@@ -1357,7 +1394,7 @@ namespace Pchp.Library.Streams
                 }
             }
 
-            return result.ToString();
+            return StringBuilderUtilities.GetStringAndReturn(result);
         }
 
         public byte[] ReadBinaryContents(int maxLength)
@@ -1374,7 +1411,7 @@ namespace Pchp.Library.Streams
                 while (maxLength > 0 && !Eof)
                 {
                     var data = ReadBytes(maxLength);
-                    if (data.Length != 0) break; // EOF or error.
+                    if (data.Length == 0) break; // EOF or error.
                     maxLength -= data.Length;
                     result.Write(data, 0, data.Length);
                 }
@@ -1400,7 +1437,7 @@ namespace Pchp.Library.Streams
         /// Reads one line (text ending with the <paramref name="ending"/> delimiter)
         /// from the stream up to <paramref name="length"/> characters long.
         /// </summary>
-        /// <param name="length">Maximum length of the returned <see cref="string"/> or <c>-1</c> for unlimited reslut.</param>
+        /// <param name="length">Maximum length of the returned <see cref="string"/> or <c>-1</c> for unlimited result.</param>
         /// <param name="ending">Delimiter of the returned line or <b>null</b> to use the system default.</param>
         /// <returns>A <see cref="string"/> containing one line from the input stream.</returns>
         public string ReadLine(int length, string ending)
@@ -1409,39 +1446,51 @@ namespace Pchp.Library.Streams
             Debug.Assert((length > 0) || (ending == null));
 
             var str = ReadData(length, ending == null) // null ending => use \n
-                .AsText(_ctx.StringEncoding);
+                .AsText(_encoding.StringEncoding);
 
             if (ending != null)
             {
                 int pos = (ending.Length == 1) ? str.IndexOf(ending[0]) : str.IndexOf(ending);
                 if (pos >= 0)
                 {
-                    string left, right;
-                    SplitData(str, pos + ending.Length - 1, out left, out right);
-                    Debug.Assert(right != null);
-                    int returnedLength = right.Length;
-                    TextElement rightElement = (this.IsBinary)
-                        ? new TextElement(_ctx.StringEncoding.GetBytes(right))
-                        : new TextElement(right);
-                    
-                    if (readBuffers.Count != 0)
+                    SplitStringAt(str, pos, ending.Length, out var left, out var right);
+                    if (right != null)
                     {
-                        // EX: Damn. Have to put the data to the front of the queue :((
-                        // Better first look into the buffers for the ending..
-                        var newBuffers = new Queue<TextElement>(readBuffers.Count + 2);
-                        newBuffers.Enqueue(rightElement);
-                        foreach (var o in readBuffers)
+                        int returnedLength = right.Length;
+                        var rightElement = this.IsBinary
+                            ? new TextElement(_encoding.StringEncoding.GetBytes(right))
+                            : new TextElement(right);
+
+                        if (readBuffers.Count != 0)
                         {
-                            newBuffers.Enqueue(o);
+                            // EX: Damn. Have to put the data to the front of the queue :((
+                            // Better first look into the buffers for the ending..
+                            var newBuffers = new Queue<TextElement>(readBuffers.Count + 2);
+                            newBuffers.Enqueue(rightElement);
+                            foreach (var o in readBuffers)
+                            {
+                                var data = o;
+                                if (readPosition > 0)
+                                {
+                                    // the buffered portion of text was read
+                                    Debug.Assert(data.Length > readPosition);
+                                    data = this.IsBinary
+                                        ? new TextElement(data.GetBytes().Slice(readPosition))
+                                        : new TextElement(data.GetText().Substring(readPosition));
+                                    readPosition = 0;
+                                }
+                                newBuffers.Enqueue(data);
+                            }
+                            readBuffers = newBuffers;
                         }
-                        readBuffers = newBuffers;
+                        else
+                        {
+                            readBuffers.Enqueue(rightElement);
+                        }
+                        // Update the offset as the data gets back.
+                        readOffset -= returnedLength;
                     }
-                    else
-                    {
-                        readBuffers.Enqueue(rightElement);
-                    }
-                    // Update the offset as the data gets back.
-                    readOffset -= returnedLength;
+
                     return left;
                 }
             }
@@ -1461,22 +1510,20 @@ namespace Pchp.Library.Streams
         public void AddFilter(IFilter filter, FilterChainOptions where)
         {
             Debug.Assert((where & FilterChainOptions.ReadWrite) != FilterChainOptions.ReadWrite);
-            List<IFilter> list = null;
+            List<IFilter> list;
 
             // Which chain.
-            if ((where & FilterChainOptions.Read) > 0)
+            if ((where & FilterChainOptions.Read) != 0)
             {
-                if (readFilters == null) readFilters = new List<IFilter>();
-                list = readFilters;
+                list = readFilters ??= new List<IFilter>();
             }
             else
             {
-                if (writeFilters == null) writeFilters = new List<IFilter>();
-                list = writeFilters;
+                list = writeFilters ??= new List<IFilter>();
             }
 
             // Position in the chain.
-            if ((where & FilterChainOptions.Tail) > 0)
+            if ((where & FilterChainOptions.Tail) != 0)
             {
                 list.Add(filter);
                 if ((list == readFilters) && (ReadBufferLength > 0))
@@ -1485,7 +1532,7 @@ namespace Pchp.Library.Streams
                     var q = new Queue<TextElement>();
                     foreach (var o in readBuffers)
                     {
-                        q.Enqueue(filter.Filter(_ctx, o, false));
+                        q.Enqueue(filter.Filter(_encoding, o, false));
                     }
 
                     readBuffers = q;
@@ -1498,19 +1545,34 @@ namespace Pchp.Library.Streams
         }
 
         /// <summary>
+        /// Removes a filter from the filter chains.
+        /// </summary>
+        public bool RemoveFilter(IFilter filter, FilterChainOptions where)
+        {
+            var list = (where & FilterChainOptions.Read) != 0 ? readFilters : writeFilters;
+            return list != null && list.Remove(filter);
+        }
+
+        /// <summary>
         /// Get enumerator of chained read/write filters.
         /// </summary>
         public IEnumerable<PhpFilter> StreamFilters
         {
             get
             {
+                var result = Enumerable.Empty<PhpFilter>();
+
                 if (readFilters != null)
-                    foreach (PhpFilter f in readFilters)
-                        yield return f;
+                {
+                    result = result.Concat(readFilters.Cast<PhpFilter>());
+                }
 
                 if (writeFilters != null)
-                    foreach (PhpFilter f in writeFilters)
-                        yield return f;
+                {
+                    result = result.Concat(writeFilters.Cast<PhpFilter>());
+                }
+
+                return result;
             }
         }
 
@@ -1609,7 +1671,7 @@ namespace Pchp.Library.Streams
         /// <param name="closing"><c>true</c> when this method is called from <c>close()</c>
         /// to prune all the pending filters with closing set to <c>true</c>.</param>
         /// <returns>Number of character entities successfully written or <c>-1</c> on an error.</returns>
-        protected int WriteData(TextElement data, bool closing = false)
+        public int WriteData(TextElement data, bool closing = false)
         {
             // Set file access to writing
             CurrentAccess = FileAccess.Write;
@@ -1630,7 +1692,7 @@ namespace Pchp.Library.Streams
                         if (closing) data = TextElement.Empty;
                         else return consumed; // Eaten all
                     }
-                    data = f.Filter(_ctx, data, closing);
+                    data = f.Filter(_encoding, data, closing);
                     if (closing) f.OnClose();
                 }
             }
@@ -1638,11 +1700,11 @@ namespace Pchp.Library.Streams
             if (textWriteFilter != null)
             {
                 // Then pass it through the text-conversion filter if any.
-                data = textWriteFilter.Filter(_ctx, data, closing);
+                data = textWriteFilter.Filter(_encoding, data, closing);
             }
 
             // From now on, the data is treated just as binary
-            byte[] bin = data.AsBytes(_ctx.StringEncoding);
+            byte[] bin = data.AsBytes(_encoding.StringEncoding);
             if (bin.Length == 0)
             {
                 return consumed;
@@ -1952,8 +2014,7 @@ namespace Pchp.Library.Streams
         /// <returns>The handle cast to PhpStream.</returns>
         public static PhpStream GetValid(PhpResource handle)
         {
-            var result = handle as PhpStream;
-            if (result != null && result.IsValid)
+            if (handle is PhpStream result && result.IsValid)
             {
                 return result;
             }
@@ -2004,9 +2065,9 @@ namespace Pchp.Library.Streams
         protected StreamContext _context;
 
         /// <summary>
-        /// Runtime context.
+        /// Runtime string encoding.
         /// </summary>
-        private Context _ctx;
+        protected readonly IEncodingProvider _encoding;
 
         /// <summary>
         /// Gets the Auto-remove option of this stream.
@@ -2207,15 +2268,15 @@ namespace Pchp.Library.Streams
         /// </remarks>
         public readonly StreamWrapper Wrapper;
 
-        //       /// <summary>
-        //       /// PHP wrapper specific data. See GetMetaData, wrapper_data array item.
-        //       /// Can be null.
-        //       /// </summary>
-        //       public object WrapperSpecificData
-        //       {
-        //           get;
-        //           internal set;
-        //       }
+        /// <summary>
+        /// PHP wrapper specific data. See wrapper_data array item.
+        /// Can be <c>null</c>.
+        /// </summary>
+        public object WrapperSpecificData
+        {
+            get;
+            internal set;
+        }
 
         /// <summary>
         /// The absolute path to the resource.
@@ -2299,7 +2360,7 @@ namespace Pchp.Library.Streams
         /// <summary>The maximum count of buffered output bytes. <c>0</c> to disable buffering.</summary>
         protected int writeBufferSize = DefaultBufferSize;
 
-        /// <summary>Store the filtered input data queued as either <see cref="string"/>s or <see cref="byte"/>[].</summary>
+        /// <summary>Store the filtered input data queued as <see cref="TextElement"/>s (either a <see cref="string"/> or <see cref="byte"/>[]).</summary>
         protected Queue<TextElement> readBuffers = null;
 
         /// <summary>Store the filtered output data in a <c>byte[]</c> up to <see cref="writeBufferSize"/> bytes.</summary>
@@ -2346,9 +2407,14 @@ namespace Pchp.Library.Streams
 
         public virtual StatStruct Stat()
         {
-            return (this.Wrapper != null)
-            ? this.Wrapper.Stat(OpenedPath, StreamStatOptions.Empty, StreamContext.Default, true)
-            : StreamWrapper.StatUnsupported();
+            if (Wrapper != null)
+            {
+                var root = _encoding is Context ctx ? ctx.RootPath : null;
+
+                return Wrapper.Stat(root, OpenedPath, StreamStatOptions.Empty, StreamContext.Default, true);
+            }
+
+            return StreamWrapper.StatUnsupported();
         }
 
         #endregion

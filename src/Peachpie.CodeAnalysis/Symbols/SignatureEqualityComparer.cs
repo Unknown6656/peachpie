@@ -12,6 +12,10 @@ namespace Pchp.CodeAnalysis.Symbols
     /// </summary>
     internal sealed class SignatureEqualityComparer : IEqualityComparer<IMethodSymbol>
     {
+        public static readonly SignatureEqualityComparer Instance = new SignatureEqualityComparer();
+
+        private SignatureEqualityComparer() { }
+
         public bool Equals(IMethodSymbol x, IMethodSymbol y)
         {
             if (x.Name == y.Name)
@@ -23,7 +27,7 @@ namespace Pchp.CodeAnalysis.Symbols
                 {
                     for (int i = 0; i < px.Length; i++)
                     {
-                        if (px[i].Type != py[i].Type)
+                        if (!SymbolEqualityComparer.Default.Equals(px[i].Type, py[i].Type))
                         {
                             return false;
                         }
@@ -38,7 +42,14 @@ namespace Pchp.CodeAnalysis.Symbols
 
         public int GetHashCode(IMethodSymbol obj)
         {
-            return obj.Parameters.Sum(p => p.Type.GetHashCode()) ^ obj.MetadataName.GetHashCode();
+            var hash = 0; ;
+            var ps = obj.Parameters;
+            for (int i = 0; i < ps.Length; i++)
+            {
+                hash = unchecked(hash + ps[i].Type.GetHashCode());
+            }
+
+            return hash ^ obj.MetadataName.GetHashCode();
         }
     }
 }

@@ -1,4 +1,6 @@
-﻿using System;
+﻿using Pchp.Core.Resources;
+using Pchp.Core.Utilities;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -11,34 +13,50 @@ namespace Pchp.Core
     /// <summary>
     /// Implements ordered keyed array of <see cref="PhpValue"/> with PHP semantics.
     /// </summary>
-    public partial class PhpArray : PhpHashtable, IPhpConvertible, IPhpArray, IPhpComparable, IPhpEnumerable
+    public partial class PhpArray : PhpHashtable, IPhpConvertible, IPhpArray, IPhpComparable, IPhpEnumerable, IPhpEnumerator
     {
         /// <summary>
-        /// Used in all PHP functions determining the type name. (var_dump, ...)
+        /// Used in all PHP functions determining the type name. (<c>var_dump</c>, ...)
         /// </summary>
         public const string PhpTypeName = "array";
 
         /// <summary>
-        /// Used in print_r function.
+        /// Used in <c>print_r</c> function.
         /// </summary>
         public const string PrintablePhpTypeName = "Array";
 
-        ///// <summary>
-		///// If this flag is <B>true</B> the array will be copied inplace by the immediate <see cref="Copy"/> call.
-		///// </summary>
-        //public bool InplaceCopyOnReturn { get { return this.table.InplaceCopyOnReturn; } set { this.table.InplaceCopyOnReturn = value; } }
+        /// <summary>
+        /// Intrinsic enumerator associated with the array.
+        /// </summary>
+        private int _intrinsicEnumerator;
 
         /// <summary>
-        /// Intrinsic enumerator associated with the array. Initialized lazily.
+        /// Empty array singleton.
+        /// Must not be modified.
         /// </summary>
-        protected OrderedDictionary.Enumerator _intrinsicEnumerator;
+        public static readonly PhpArray Empty = new PhpArray();
+
+        /// <summary>
+        /// Fast creation of an empty array
+        /// by referencing internal structure of empty singleton.
+        /// </summary>
+        public static PhpArray NewEmpty() => Empty.DeepCopy();
+
+        /// <summary>
+        /// Helper property used by visitor algorithms.
+        /// Gets value determining whether this instance has been visited during recursive pass of some structure containing <see cref="PhpArray"/>s.
+        /// </summary>
+        /// <remarks>
+        /// Must be decreased immediately after the pass.
+        /// </remarks>
+        int _visited;
 
         #region Constructors
 
         /// <summary>
         /// Creates a new instance of <see cref="PhpArray"/> with specified capacities for integer and string keys respectively.
         /// </summary>
-        public PhpArray() : base() { }
+        public PhpArray() { }
 
         /// <summary>
         /// Creates a new instance of <see cref="PhpArray"/> with specified capacities for integer and string keys respectively.
@@ -47,11 +65,9 @@ namespace Pchp.Core
         public PhpArray(int capacity) : base(capacity) { }
 
         /// <summary>
-        /// Creates a new instance of <see cref="PhpArray"/> with specified capacities for integer and string keys respectively.
+        /// Creates new instance with given table data.
         /// </summary>
-        /// <param name="intCapacity"></param>
-        /// <param name="stringCapacity"></param>
-        public PhpArray(int intCapacity, int stringCapacity) : base(intCapacity + stringCapacity) { }
+        public PhpArray(OrderedDictionary table) : base(table) { }
 
         /// <summary>
         /// Creates a new instance of <see cref="PhpArray"/> initialized with all values from <see cref="System.Array"/>.
@@ -60,12 +76,62 @@ namespace Pchp.Core
         public PhpArray(Array values) : base(values) { }
 
         /// <summary>
+        /// Creates a new instance of <see cref="PhpArray"/> initialized with all values from <see cref="System.Array"/>.
+        /// </summary>
+        /// <param name="values">Array of values.</param>
+        public PhpArray(PhpValue[] values)
+            : base(values.Length)
+        {
+            for (int i = 0; i < values.Length; i++)
+            {
+                table.Add(values[i]);
+            }
+        }
+
+        /// <summary>
+        /// Creates a new instance of <see cref="PhpArray"/> initialized with all values from <see cref="System.Array"/>.
+        /// </summary>
+        /// <param name="values">Array of values.</param>
+        public PhpArray(PhpValue?[] values)
+            : base(values.Length)
+        {
+            for (int i = 0; i < values.Length; i++)
+            {
+                table.Add(values[i].GetValueOrDefault(PhpValue.Null));
+            }
+        }
+
+        /// <summary>
+        /// Creates a new instance of <see cref="PhpArray"/> initialized with all values from <see cref="System.Array"/>.
+        /// </summary>
+        public PhpArray(string[] values)
+            : base(values.Length)
+        {
+            for (int i = 0; i < values.Length; i++)
+            {
+                table.Add(values[i]);
+            }
+        }
+
+        /// <summary>
         /// Creates a new instance of <see cref="PhpArray"/> initialized with a portion of <see cref="System.Array"/>.
         /// </summary>
         /// <param name="values"></param>
         /// <param name="index"></param>
         /// <param name="length"></param>
         public PhpArray(Array values, int index, int length) : base(values, index, length) { }
+
+        /// <summary>
+		/// Initializes a new instance of the <see cref="PhpArray"/> class filled by values from specified array.
+		/// </summary>
+		/// <param name="values">An array of values to be added to the table.</param>
+		/// <param name="start">An index of the first item from <paramref name="values"/> to add.</param>
+		/// <param name="length">A number of items to add.</param>
+		/// <param name="value">A value to be filtered.</param>
+		/// <param name="doFilter">Wheter to add all items but <paramref name="value"/> (<b>true</b>) or 
+		/// all items with the value <paramref name="value"/> (<b>false</b>).</param>
+		public PhpArray(int[] values, int start, int length, int value, bool doFilter)
+            : base(values, start, length, value, doFilter) { }
 
         ///// <summary>
         ///// Initializes a new instance of the <see cref="PhpArray"/> class filled by values from specified array.
@@ -84,27 +150,67 @@ namespace Pchp.Core
         /// </summary>
         /// <param name="data">The enumerator containing values added to the new instance.</param>
         public PhpArray(IEnumerable data)
-            : base((data is ICollection) ? ((ICollection)data).Count : 0)
+            : base(data is ICollection collection ? collection.Count : 0)
         {
             if (data != null)
             {
-                foreach (object value in data)
+                AddRange(data);
+            }
+        }
+
+        /// <summary>
+        /// Creates a new instance of <see cref="PhpArray"/> filled by data from an enumerator.
+        /// </summary>
+        /// <param name="data">The enumerator containing values added to the new instance.</param>
+        public PhpArray(IEnumerable<PhpValue> data)
+            : base(data is ICollection collection ? collection.Count : 0)
+        {
+            if (data != null)
+            {
+                AddRange(data);
+            }
+        }
+
+        public PhpArray(IEnumerable<string> data)
+            : base(data is ICollection collection ? collection.Count : 0)
+        {
+            if (data != null)
+            {
+                AddRange(data);
+            }
+        }
+
+        /// <summary>
+        /// Creates a new instance of <see cref="PhpArray"/> filled by data from an enumerator.
+        /// </summary>
+        /// <param name="data">The enumerator containing values added to the new instance.</param>
+        public PhpArray(IEnumerable<KeyValuePair<IntStringKey, PhpValue>> data)
+            : base(data is ICollection collection ? collection.Count : 0)
+        {
+            if (data != null)
+            {
+                foreach (var item in data)
                 {
-                    AddToEnd(PhpValue.FromClr(value));
+                    Add(item);
                 }
             }
         }
+
+        public static explicit operator PhpArray(string value) => New(value);
+        public static explicit operator PhpArray(PhpString value) => New(value);
+        public static explicit operator PhpArray(long value) => New(value);
+        public static explicit operator PhpArray(double value) => New(value);
+        public static explicit operator PhpArray(bool value) => New(value);
 
         /// <summary>
         /// Copy constructor. Creates <see cref="PhpArray"/> that shares internal data table with another <see cref="PhpArray"/>.
         /// </summary>
         /// <param name="array">Table to be shared.</param>
-        /// <param name="preserveMaxInt">True to copy the <see cref="PhpHashtable.MaxIntegerKey"/> from <paramref name="array"/>.
-        /// Otherwise the value will be recomputed when needed. See http://phalanger.codeplex.com/workitem/31484 for more details.</param>
-        public PhpArray(PhpArray/*!*/array, bool preserveMaxInt)
-            : base(array, preserveMaxInt)
+        public PhpArray(PhpArray/*!*/array)
+            : base(array)
         {
-
+            //// preserve intrinsic enumerator state
+            //_intrinsicEnumerator = array._intrinsicEnumerator?.WithTable(this); // copies state of intrinsic enumerator or null
         }
 
         /// <summary>
@@ -114,9 +220,13 @@ namespace Pchp.Core
         /// Keys will correspond order of values in the array.</param>
         public static PhpArray New(params object[] values)
         {
-            PhpArray result = new PhpArray(values.Length, 0);
-            foreach (object value in values)
-                result.Add(value);
+            var result = new PhpArray(values.Length);
+
+            for (int i = 0; i < values.Length; i++)
+            {
+                result.Add(values[i]);
+            }
+
             return result;
         }
 
@@ -127,11 +237,20 @@ namespace Pchp.Core
         /// Keys will correspond order of values in the array.</param>
         public static PhpArray New(params PhpValue[] values)
         {
-            PhpArray result = new PhpArray(values.Length, 0);
-            foreach (var value in values)
-                result.Add(value);
+            var result = new PhpArray(values.Length);
+
+            for (int i = 0; i < values.Length; i++)
+            {
+                result.AddToEnd(values[i]);
+            }
+
             return result;
         }
+
+        /// <summary>
+        /// Makes new array containing union of two arrays.
+        /// </summary>
+        public static PhpArray Union(PhpArray x, PhpArray y) => (PhpArray)x.DeepCopy().Unite(y);
 
         /// <summary>
         /// Creates an instance of <see cref="PhpArray"/> filled by given entries.
@@ -160,10 +279,29 @@ namespace Pchp.Core
         /// Keys will correspond order of values in the array.</param>
         public static PhpArray New(PhpValue value)
         {
-            return new PhpArray(1, 0)
+            return new PhpArray(1)
             {
                 value
             };
+        }
+
+        /// <summary>
+        /// Creates array from PHP enumerator.
+        /// </summary>
+        internal static PhpArray Create(IPhpEnumerator phpenumerator)
+        {
+            Debug.Assert(phpenumerator != null);
+
+            var arr = new PhpArray();
+
+            while (phpenumerator.MoveNext())
+            {
+                var current = phpenumerator.Current;
+                arr.Add(current.Key.ToIntStringKey(), current.Value);
+            }
+
+            //
+            return arr;
         }
 
         #endregion
@@ -173,12 +311,92 @@ namespace Pchp.Core
         /// <summary>
         /// Creates copy of this instance using shared underlaying hashtable.
         /// </summary>
-        public PhpArray DeepCopy() => new PhpArray(this);
+        public PhpArray DeepCopy() => new PhpArray(table.AddRef());
 
         /// <summary>
-        /// Gets PHP enumerator for this array.
+        /// Makes clone of this array with deeply copied values.
         /// </summary>
-        public new OrderedDictionary.Enumerator GetEnumerator() => new OrderedDictionary.Enumerator(this);
+        /// <returns>Cloned instance of <see cref="PhpArray"/>.</returns>
+        public override object Clone()
+        {
+            var clone = DeepCopy();
+            clone.EnsureWritable();
+            return clone;
+        }
+
+        /// <summary>
+        /// Adds a variable into the array while keeping duplicit keys in sub-arrays of indexed items.
+        /// </summary>
+        /// <param name="name">Key, respecting <c>[subkey]</c> notation.</param>
+        /// <param name="value">The value.</param>
+        /// <remarks>See <see cref="NameValueCollectionUtils.AddVariable(PhpArray, string, PhpValue, string, bool)"/> for details.</remarks>
+        public void AddVariable(string name, string value) => NameValueCollectionUtils.AddVariable(this, name, value);
+
+        /// <summary>
+        /// Gets reference (<c>ref</c> <see cref="PhpValue"/>) to the item at given index.
+        /// </summary>
+        public ref PhpValue GetItemRef(IntStringKey key) => ref table.EnsureValue(key);
+
+        /// <summary>
+        /// Gets value indicating the PHP variable is empty (empty array).
+        /// </summary>
+        public bool IsEmpty() => Count == 0;
+
+        /// <summary>
+        /// Unsets the value.
+        /// Releases reference and removes the value from the collection.
+        /// </summary>
+        public void UnsetValue(IntStringKey key)
+        {
+            if (TryGetValue(key, out var value))
+            {
+                if (value.Object is PhpAlias alias)
+                {
+                    alias.ReleaseRef();
+                }
+
+                RemoveKey(key);
+            }
+        }
+
+        /// <summary>
+        /// Not used.
+        /// </summary>
+        void IDisposable.Dispose()
+        {
+        }
+
+        #endregion
+
+        #region Conversion operators
+
+        /// <summary>
+        /// Explicit cast of array to <see cref="int"/>.
+        /// Gets number of items in the array.
+        /// </summary>
+        public static explicit operator int(PhpArray array) => array.Count;
+
+        /// <summary>
+        /// Explicit cast of array to <see cref="double"/>.
+        /// Gets number of items in the array.
+        /// </summary>
+        public static explicit operator double(PhpArray array) => array.Count;
+
+        /// <summary>
+        /// Explicit cast of array to <see cref="string"/>.
+        /// Always returns <c>"Array"</c> string literal.
+        /// </summary>
+        public static explicit operator string(PhpArray _)
+        {
+            PhpException.Throw(PhpError.Notice, ErrResources.array_to_string_conversion);
+            return PrintablePhpTypeName;
+        }
+
+        /// <summary>
+        /// Explicit cast of array to <see cref="bool"/>.
+        /// Gets <c>true</c> if array contains any elements.
+        /// </summary>
+        public static explicit operator bool(PhpArray array) => array != null && array.Count != 0;
 
         #endregion
 
@@ -186,68 +404,340 @@ namespace Pchp.Core
 
         public PhpTypeCode TypeCode => PhpTypeCode.PhpArray;
 
-        public double ToDouble() => Count;
+        double IPhpConvertible.ToDouble() => Count;
 
-        public long ToLong() => Count;
+        long IPhpConvertible.ToLong() => Count;
 
-        public bool ToBoolean() => Count != 0;
+        bool IPhpConvertible.ToBoolean() => Count != 0;
 
-        public Convert.NumberInfo ToNumber(out PhpNumber number)
+        Convert.NumberInfo IPhpConvertible.ToNumber(out PhpNumber number)
         {
             number = PhpNumber.Create(Count);
             return Convert.NumberInfo.IsPhpArray | Convert.NumberInfo.LongInteger;
         }
 
-        public string ToString(Context ctx)
-        {
-            return PrintablePhpTypeName;
-        }
+        string IPhpConvertible.ToString() => (string)this;
 
-        public string ToStringOrThrow(Context ctx)
-        {
-            //PhpException.Throw(PhpError.Notice, CoreResources.GetString("array_to_string_conversion"));
-            
-            return ToString(ctx);
-        }
+        /// <summary>
+        /// Creates <see cref="stdClass"/> with runtime instance fields copied from entries of this array.
+        /// </summary>
+        object IPhpConvertible.ToClass() => ToObject();
 
-        public object ToClass()
-        {
-            return new stdClass()
-            {
-                __peach__runtimeFields = this.DeepCopy()
-            };
-        }
+        /// <summary>
+        /// Creates <see cref="stdClass"/> instance which runtime fields are copied from this array.
+        /// </summary>
+        /// <returns>Instance of <see cref="stdClass"/>. Cannot be <c>null</c>.</returns>
+        public stdClass/*!*/ToObject() => this.DeepCopy().AsStdClass();
+
+        public PhpArray ToArray() => this;
 
         #endregion
 
         #region IPhpComparable
 
-        public int Compare(PhpValue obj)
+        public int Compare(PhpValue value) => Compare(value, PhpComparer.Default);
+
+        public int Compare(PhpValue value, IComparer<PhpValue> comparer)
         {
-            switch (obj.TypeCode)
+            switch (value.TypeCode)
             {
+                case PhpTypeCode.Null:
+                    return Count;
+
                 case PhpTypeCode.Object:
-                    if (obj.Object == null) return Count;
-                    break;
+                    return 1;
 
                 case PhpTypeCode.Boolean:
-                    return (Count > 0 ? 2 : 1) - (obj.Boolean ? 2 : 1);
+                    return (Count > 0 ? 2 : 1) - (value.Boolean ? 2 : 1);
 
                 case PhpTypeCode.PhpArray:
                     // compare elements:
-                    //bool incomparable;
-                    //int result = CompareArrays(this, obj.Array, comparer, out incomparable);
-                    //if (incomparable)
-                    //{
-                    //    //PhpException.Throw(PhpError.Warning, CoreResources.GetString("incomparable_arrays_compared"));
-                    //    throw new ArgumentException("incomparable_arrays_compared");
-                    //}
-                    //return result;
-                    throw new NotImplementedException();
+                    bool incomparable;
+                    int result = CompareArrays(this, value.Array, comparer, out incomparable);
+                    if (incomparable)
+                    {
+                        PhpException.Throw(PhpError.Warning, ErrResources.incomparable_arrays_compared);
+                    }
+                    return result;
+
+                case PhpTypeCode.Alias:
+                    return Compare(value.Alias.Value, comparer);
             }
 
             //
             return 1;
+        }
+
+        /// <summary>
+		/// Compares two instances of <see cref="PhpArray"/>.
+		/// </summary>
+        /// <param name="x">First operand. Cannot be <c>null</c>.</param>
+        /// <param name="y">Second operand. Cannot be <c>null</c>.</param>
+		/// <param name="comparer">The comparer.</param>
+		/// <param name="incomparable">Whether arrays are incomparable 
+		/// (no difference is found before both arrays enters an infinite recursion). 
+		/// Returns zero then.</param>
+		public static int CompareArrays(PhpArray x, PhpArray y, IComparer<PhpValue> comparer, out bool incomparable)
+        {
+            Debug.Assert(x != null && y != null);
+
+            incomparable = false;
+
+            // if both operands point to the same internal dictionary:
+            if (ReferenceEquals(x.table, y.table)) return 0; // => x == y
+
+            //
+            PhpArray array_x, array_y;
+            PhpArray sorted_x, sorted_y;
+
+            // if numbers of elements differs:
+            int result = x.Count - y.Count;
+            if (result != 0) return result;
+
+            // marks arrays as visited (will be always restored to false value before return):
+            x._visited++;
+            y._visited++;
+
+            // it will be more effective to implement OrderedHashtable.ToOrderedList method and use it here (in future version):
+            sorted_x = x.DeepCopy();
+            sorted_x.Sort(KeyComparer.ArrayKeys);
+            sorted_y = y.DeepCopy();
+            sorted_y.Sort(KeyComparer.ArrayKeys);
+
+            var iter_x = sorted_x.GetFastEnumerator();
+            var iter_y = sorted_y.GetFastEnumerator();
+
+            result = 0;
+
+            try
+            {
+                // compares corresponding elements (keys first values then):
+                while (iter_x.MoveNext())
+                {
+                    iter_y.MoveNext();
+
+                    // compares keys:
+                    result = iter_x.CurrentKey.CompareTo(iter_y.CurrentKey);
+                    if (result != 0) break;
+
+                    // dereferences childs if they are references:
+                    var child_x = iter_x.CurrentValue.GetValue();
+                    var child_y = iter_y.CurrentValue.GetValue();
+
+                    // compares values:
+                    if ((array_x = child_x.ArrayOrNull()) != null)
+                    {
+                        if ((array_y = child_y.ArrayOrNull()) != null)
+                        {
+                            // at least one child has not been visited yet => continue with recursion:
+                            if (array_x._visited == 0 || array_y._visited == 0)
+                            {
+                                result = CompareArrays(array_x, array_y, comparer, out incomparable);
+                            }
+                            else
+                            {
+                                incomparable = true;
+                            }
+
+                            // infinity recursion has been detected:
+                            if (incomparable) break;
+                        }
+                        else
+                        {
+                            // compares an array with a non-array:
+                            array_x.Compare(child_y, comparer);
+                        }
+                    }
+                    else
+                    {
+                        // compares unknown item with a non-array:
+                        result = -comparer.Compare(child_y, child_x);
+                    }
+
+                    if (result != 0) break;
+                } // while
+            }
+            finally
+            {
+                x._visited--;
+                y._visited--;
+            }
+            return result;
+        }
+
+        #endregion
+
+        #region Strict Comparison
+
+        /// <summary>
+        /// Compares this instance with another <see cref="PhpArray"/>.
+        /// </summary>
+        /// <param name="array">The array to be strictly compared.</param>
+        /// <returns>Whether this instance strictly equals to <paramref name="array"/>.</returns>
+        /// <remarks>
+        /// Arrays are strictly equal if all entries are strictly equal and in the same order in both arrays.
+        /// Entries are strictly equal if keys are the same and values are strictly equal 
+        /// in the terms of operator <B>===</B>.
+        /// </remarks>
+        public bool StrictCompareEq(PhpArray array)
+        {
+            bool incomparable = false;
+
+            var result = array != null && StrictCompareArrays(this, array, out incomparable);
+            if (incomparable)
+            {
+                PhpException.Throw(PhpError.Warning, ErrResources.incomparable_arrays_compared);
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Compares two instances of <see cref="PhpArray"/> for strict equality.
+        /// </summary>
+        /// <param name="x">First operand. Cannot be <c>null</c>.</param>
+        /// <param name="y">Second operand. Cannot be <c>null</c>.</param>
+		/// <param name="incomparable">Whether arrays are incomparable 
+        /// (no difference is found before both arrays enters an infinite recursion). 
+        /// Returns <B>true</B> then.</param>
+        static bool StrictCompareArrays(PhpArray x, PhpArray y, out bool incomparable)
+        {
+            Debug.Assert(x != null && y != null);
+
+            incomparable = false;
+
+            // if both operands point to the same internal dictionary:
+            if (ReferenceEquals(x.table, y.table)) return true; // => x == y
+
+            // if numbers of elements differs:
+            if (x.Count != y.Count) return false;
+
+            var iter_x = x.GetFastEnumerator();
+            var iter_y = y.GetFastEnumerator();
+
+            PhpArray array_x, array_y;
+
+            // marks arrays as visited (will be always restored to false value before return):
+            x._visited++;
+            y._visited++;
+
+            bool result = true;
+
+            try
+            {
+                // compares corresponding elements (keys first values then):
+                while (result && iter_x.MoveNext())
+                {
+                    iter_y.MoveNext();
+
+                    // compares keys:
+                    if (!iter_x.Current.Key.Equals(iter_y.Current.Key))
+                    {
+                        result = false;
+                        break;
+                    }
+
+                    var child_x = iter_x.CurrentValue;
+                    var child_y = iter_y.CurrentValue;
+
+                    // compares values:
+                    if ((array_x = child_x.ArrayOrNull()) != null)
+                    {
+                        if ((array_y = child_y.ArrayOrNull()) != null)
+                        {
+                            // at least one child has not been visited yet => continue with recursion:
+                            if (array_x._visited == 0 || array_y._visited == 0)
+                            {
+                                result = StrictCompareArrays(array_x, array_y, out incomparable);
+                            }
+                            else
+                            {
+                                incomparable = true;
+                                break;
+                            }
+                        }
+                        else
+                        {
+                            // an array with a non-array comparison:
+                            result = false;
+                        }
+                    }
+                    else
+                    {
+                        // compares unknown item with a non-array:
+                        result = child_x.GetValue().StrictEquals(child_y.GetValue());
+                    }
+                } // while
+            }
+            finally
+            {
+                x._visited--;
+                y._visited--;
+            }
+            return result;
+        }
+
+        #endregion
+
+        #region IPhpEnumerator (IntrinsicEnumerator)
+
+        private bool EnsureIntrinsicEnumerator() => OrderedDictionary.FastEnumerator.EnsureValid(table, ref _intrinsicEnumerator);
+
+        bool IPhpEnumerator.MoveLast() => OrderedDictionary.FastEnumerator.MoveLast(table, out _intrinsicEnumerator);
+
+        bool IPhpEnumerator.MoveFirst()
+        {
+            _intrinsicEnumerator = 0;
+            return EnsureIntrinsicEnumerator();
+        }
+
+        bool IPhpEnumerator.MovePrevious() => EnsureIntrinsicEnumerator() && OrderedDictionary.FastEnumerator.MovePrevious(table, ref _intrinsicEnumerator);
+
+        bool IPhpEnumerator.AtEnd => !EnsureIntrinsicEnumerator();
+
+        PhpValue IPhpEnumerator.CurrentValue
+        {
+            get
+            {
+                if (EnsureIntrinsicEnumerator())
+                    return new OrderedDictionary.FastEnumerator(table, _intrinsicEnumerator).CurrentValue;
+                else
+                    return PhpValue.False;
+            }
+        }
+
+        PhpAlias IPhpEnumerator.CurrentValueAliased
+        {
+            get
+            {
+                if (EnsureIntrinsicEnumerator())
+                    return new OrderedDictionary.FastEnumerator(table, _intrinsicEnumerator).CurrentValueAliased;
+                else
+                    return default;
+            }
+        }
+
+        PhpValue IPhpEnumerator.CurrentKey => EnsureIntrinsicEnumerator()
+            ? (PhpValue)new OrderedDictionary.FastEnumerator(table, _intrinsicEnumerator).CurrentKey
+            : PhpValue.Null;
+
+        void IEnumerator.Reset() => ((IPhpEnumerator)this).MoveFirst();
+
+        bool IEnumerator.MoveNext() => EnsureIntrinsicEnumerator() && OrderedDictionary.FastEnumerator.MoveNext(table, ref _intrinsicEnumerator);
+
+        object IEnumerator.Current => ((IPhpEnumerator)this).CurrentValue.ToClr();
+
+        KeyValuePair<PhpValue, PhpValue> IEnumerator<KeyValuePair<PhpValue, PhpValue>>.Current
+        {
+            get
+            {
+                if (EnsureIntrinsicEnumerator())
+                {
+                    var pair = new OrderedDictionary.FastEnumerator(table, _intrinsicEnumerator).Current;
+                    return new KeyValuePair<PhpValue, PhpValue>(pair.Key, pair.Value);
+                }
+                return default;
+            }
         }
 
         #endregion
@@ -255,23 +745,11 @@ namespace Pchp.Core
         #region IPhpEnumerable Members
 
         /// <summary>
-        /// Intrinsic enumerator associated with the array. Initialized lazily when read for the first time.
+        /// Intrinsic enumerator associated with the array.
         /// The enumerator points to the first item of the array immediately after the initialization if exists,
         /// otherwise it points to an invalid item and <see cref="IPhpEnumerator.AtEnd"/> is <B>true</B>.
         /// </summary>
-        public IPhpEnumerator/*!*/ IntrinsicEnumerator
-        {
-            get
-            {
-                // initializes enumerator:
-                if (_intrinsicEnumerator == null)
-                {
-                    _intrinsicEnumerator = this.GetPhpEnumerator();
-                    _intrinsicEnumerator.MoveNext();
-                }
-                return _intrinsicEnumerator;
-            }
-        }
+        public IPhpEnumerator/*!*/IntrinsicEnumerator => this;
 
         /// <summary>
         /// Restarts intrinsic enumerator - moves it to the first item.
@@ -279,20 +757,33 @@ namespace Pchp.Core
         /// <remarks>
         /// If the intrinsic enumerator has never been used on this instance nothing happens.
         /// </remarks>
-        public void RestartIntrinsicEnumerator()
-        {
-            if (_intrinsicEnumerator != null)
-                _intrinsicEnumerator.MoveFirst();
-        }
+        public void RestartIntrinsicEnumerator() => ((IEnumerator)this).Reset();
 
         /// <summary>
         /// Creates an enumerator used in foreach statement.
         /// </summary>
         /// <param name="aliasedValues">Whether the values returned by enumerator are assigned by reference.</param>
         /// <returns>The dictionary enumerator.</returns>
-        public IPhpEnumerator GetForeachEnumerator(bool aliasedValues) => aliasedValues
-                ? new OrderedDictionary.Enumerator(this)            // when enumerating aliases, changes are reflected to the enumerator
-                : new OrderedDictionary.ReadonlyEnumerator(this);   // when enumerating values, any upcoming changes to the array do not take effect to the enumerator
+        public IPhpEnumerator/*!*/GetForeachEnumerator(bool aliasedValues)
+        {
+            if (Count == 0)
+            {
+                return EmptyPhpEnumerator.Instance;
+            }
+
+            if (aliasedValues)
+            {
+                EnsureWritable();
+
+                // when enumerating aliases, changes are reflected to the enumerator;
+                return new OrderedDictionary.Enumerator(table);
+            }
+            else
+            {
+                // when enumerating values, any upcoming changes to the array do not take effect to the enumerator
+                return new OrderedDictionary.ReadonlyEnumerator(table);
+            }
+        }
 
         /// <summary>
         /// Creates an enumerator used in foreach statement.
@@ -307,31 +798,89 @@ namespace Pchp.Core
 
         #region IPhpArray
 
-        public PhpValue GetItemValue(IntStringKey key) => table._get(ref key);
+        public PhpValue GetItemValue(IntStringKey key) => table.GetValueOrNull(key);
+
+        public PhpValue GetItemValue(PhpValue index)
+        {
+            if (index.TryToIntStringKey(out var key))
+            {
+                return GetItemValue(key);
+            }
+            else
+            {
+                PhpException.IllegalOffsetType();
+                return PhpValue.Null;
+            }
+        }
 
         public void SetItemValue(IntStringKey key, PhpValue value)
         {
             this.EnsureWritable();
-            table._add_or_update_preserve_ref(ref key, value);
-            this.KeyAdded(ref key);
+            table.AssignValue(key, value);
+        }
+
+        public void SetItemValue(PhpValue index, PhpValue value)
+        {
+            if (index.TryToIntStringKey(out var key))
+            {
+                SetItemValue(key, value);
+            }
+            else
+            {
+                PhpException.IllegalOffsetType();
+            }
         }
 
         public void SetItemAlias(IntStringKey key, PhpAlias alias)
         {
             this.EnsureWritable();
-            table._add_or_update(ref key, PhpValue.Create(alias));
-            this.KeyAdded(ref key);
+
+            // TODO: ReleaseRef of previous value if any
+
+            table[key] = PhpValue.Create(alias);
+        }
+
+        public void SetItemAlias(PhpValue index, PhpAlias alias)
+        {
+            if (index.TryToIntStringKey(out IntStringKey key))
+            {
+                SetItemAlias(key, alias);
+            }
+            else
+            {
+                throw new ArgumentException(nameof(index));
+            }
         }
 
         public void AddValue(PhpValue value) => Add(value);
 
-        public PhpAlias EnsureItemAlias(IntStringKey key) => table._ensure_item_alias(ref key, this);
+        public PhpAlias EnsureItemAlias(IntStringKey key)
+        {
+            this.EnsureWritable();
+            return PhpValue.EnsureAlias(ref table.EnsureValue(key));
+        }
 
-        public object EnsureItemObject(IntStringKey key) => table._ensure_item_object(ref key, this);
+        public object EnsureItemObject(IntStringKey key)
+        {
+            this.EnsureWritable();
+            return PhpValue.EnsureObject(ref table.EnsureValue(key));
+        }
 
-        public IPhpArray EnsureItemArray(IntStringKey key) => table._ensure_item_array(ref key, this);
+        public IPhpArray EnsureItemArray(IntStringKey key)
+        {
+            this.EnsureWritable();
+            return PhpValue.EnsureArray(ref table.EnsureValue(key));
+        }
 
         public void RemoveKey(IntStringKey key) => this.Remove(key);
+
+        public void RemoveKey(PhpValue index)
+        {
+            if (index.TryToIntStringKey(out var key))
+            {
+                this.Remove(key);
+            }
+        }
 
         #endregion
     }

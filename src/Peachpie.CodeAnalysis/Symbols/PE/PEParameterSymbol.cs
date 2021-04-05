@@ -1,4 +1,6 @@
 ﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.PooledObjects;
+using Peachpie.CodeAnalysis.Symbols;
 using Roslyn.Utilities;
 using System;
 using System.Collections.Generic;
@@ -32,6 +34,8 @@ namespace Pchp.CodeAnalysis.Symbols
             IsCallerFilePath = 0x1 << 5,
             IsCallerLineNumber = 0x1 << 6,
             IsCallerMemberName = 0x1 << 7,
+            NotNull = 0x1 << 8,
+            PhpRw = 0x1 << 9,
         }
 
         #endregion
@@ -41,22 +45,28 @@ namespace Pchp.CodeAnalysis.Symbols
         private struct PackedFlags
         {
             // Layout:
-            // |.............|n|rr|cccccccc|vvvvvvvv|
+            // |..........vu|n|rr|cccccccc|vvvvvvvv|
             // 
             // v = decoded well known attribute values. 8 bits.
             // c = completion states for well known attributes. 1 if given attribute has been decoded, 0 otherwise. 8 bits.
             // r = RefKind. 2 bits.
             // n = hasNameInMetadata. 1 bit.
+            // u = HasNotNull. 1 bit.
+            // v = HasNotNull populated. 1 bit.
 
             private const int WellKnownAttributeDataOffset = 0;
-            private const int WellKnownAttributeCompletionFlagOffset = 8;
-            private const int RefKindOffset = 16;
+            private const int WellKnownAttributeCompletionFlagOffset = 10;
+            private const int RefKindOffset = 20;
 
             private const int RefKindMask = 0x3;
-            private const int WellKnownAttributeDataMask = 0xFF;
+            private const int WellKnownAttributeDataMask = (0x1 << WellKnownAttributeCompletionFlagOffset) - 1;
             private const int WellKnownAttributeCompletionFlagMask = WellKnownAttributeDataMask;
 
-            private const int HasNameInMetadataBit = 0x1 << 18;
+            private const int HasNameInMetadataBit = 0x1 << 22;
+            private const int HasDefaultValueFieldPopulatedBit = 0x1 << 23;
+
+            private const int HasNotNullBit = 0x1 << 24;
+            private const int HasNotNullPopulatedBit = 0x1 << 25;
 
             private const int AllWellKnownAttributesCompleteNoData = WellKnownAttributeCompletionFlagMask << WellKnownAttributeCompletionFlagOffset;
 
@@ -70,6 +80,16 @@ namespace Pchp.CodeAnalysis.Symbols
             public bool HasNameInMetadata
             {
                 get { return (_bits & HasNameInMetadataBit) != 0; }
+            }
+
+            public bool HasDefaultValueFieldPopulated
+            {
+                get { return (_bits & HasDefaultValueFieldPopulatedBit) != 0; }
+            }
+
+            public void SetDefaultValueFieldPopulated()
+            {
+                ThreadSafeFlagOperations.Set(ref _bits, HasDefaultValueFieldPopulatedBit);
             }
 
             public PackedFlags(RefKind refKind, bool attributesAreComplete, bool hasNameInMetadata)
@@ -101,6 +121,19 @@ namespace Pchp.CodeAnalysis.Symbols
                 value = (theBits & ((int)flag << WellKnownAttributeDataOffset)) != 0;
                 return (theBits & ((int)flag << WellKnownAttributeCompletionFlagOffset)) != 0;
             }
+
+            public void SetHasNotNull(bool value)
+            {
+                int bitsToSet = HasNotNullPopulatedBit | (value ? HasNotNullBit : 0);
+                ThreadSafeFlagOperations.Set(ref _bits, bitsToSet);
+            }
+
+            public bool TryGetHasNotNull(out bool value)
+            {
+                int theBits = _bits; // Read this.bits once to ensure the consistency of the value and completion flags.
+                value = (theBits & HasNotNullBit) != 0;
+                return (theBits & HasNotNullPopulatedBit) != 0;
+            }
         }
 
         #endregion
@@ -115,6 +148,8 @@ namespace Pchp.CodeAnalysis.Symbols
         private ImmutableArray<AttributeData> _lazyCustomAttributes;
         private ConstantValue _lazyDefaultValue = ConstantValue.Unset;
         private ThreeState _lazyIsParams;
+        private ImportValueAttributeData _lazyImportValueAttributeData;
+        private FieldSymbol _lazyDefaultValueField; // field used to load a default value of the optional parameter
 
         /// <summary>
         /// Attributes filtered out from m_lazyCustomAttributes, ParamArray, etc.
@@ -132,7 +167,7 @@ namespace Pchp.CodeAnalysis.Symbols
             ParamInfo<TypeSymbol> parameter,
             out bool isBad)
         {
-            return Create(moduleSymbol, containingSymbol, ordinal, parameter.IsByRef, parameter.CountOfCustomModifiersPrecedingByRef, parameter.Type, parameter.Handle, parameter.CustomModifiers, out isBad);
+            return Create(moduleSymbol, containingSymbol, ordinal, parameter.IsByRef, parameter.Type, parameter.Handle, parameter.CustomModifiers, out isBad);
         }
 
         /// <summary>
@@ -154,7 +189,7 @@ namespace Pchp.CodeAnalysis.Symbols
             ParamInfo<TypeSymbol> parameter,
             out bool isBad)
         {
-            return Create(moduleSymbol, containingSymbol, ordinal, parameter.IsByRef, parameter.CountOfCustomModifiersPrecedingByRef, parameter.Type, handle, parameter.CustomModifiers, out isBad);
+            return Create(moduleSymbol, containingSymbol, ordinal, parameter.IsByRef, parameter.Type, handle, parameter.CustomModifiers, out isBad);
         }
 
         private PEParameterSymbol(
@@ -164,7 +199,6 @@ namespace Pchp.CodeAnalysis.Symbols
             bool isByRef,
             TypeSymbol type,
             ParameterHandle handle,
-            int countOfCustomModifiers,
             out bool isBad)
         {
             Debug.Assert((object)moduleSymbol != null);
@@ -238,7 +272,6 @@ namespace Pchp.CodeAnalysis.Symbols
             Symbol containingSymbol,
             int ordinal,
             bool isByRef,
-            ushort countOfCustomModifiersPrecedingByRef,
             TypeSymbol type,
             ParameterHandle handle,
             ImmutableArray<ModifierInfo<TypeSymbol>> customModifiers,
@@ -246,34 +279,30 @@ namespace Pchp.CodeAnalysis.Symbols
         {
             if (customModifiers.IsDefaultOrEmpty)
             {
-                return new PEParameterSymbol(moduleSymbol, containingSymbol, ordinal, isByRef, type, handle, 0, out isBad);
+                return new PEParameterSymbol(moduleSymbol, containingSymbol, ordinal, isByRef, type, handle, out isBad);
             }
 
-            return new PEParameterSymbolWithCustomModifiers(moduleSymbol, containingSymbol, ordinal, isByRef, countOfCustomModifiersPrecedingByRef, type, handle, customModifiers, out isBad);
+            return new PEParameterSymbolWithCustomModifiers(moduleSymbol, containingSymbol, ordinal, isByRef, type, handle, customModifiers, out isBad);
         }
 
         private sealed class PEParameterSymbolWithCustomModifiers : PEParameterSymbol
         {
             private readonly ImmutableArray<CustomModifier> _customModifiers;
-            private readonly ushort _countOfCustomModifiersPrecedingByRef;
 
             public PEParameterSymbolWithCustomModifiers(
                 PEModuleSymbol moduleSymbol,
                 Symbol containingSymbol,
                 int ordinal,
                 bool isByRef,
-                ushort countOfCustomModifiersPrecedingByRef,
                 TypeSymbol type,
                 ParameterHandle handle,
                 ImmutableArray<ModifierInfo<TypeSymbol>> customModifiers,
                 out bool isBad) :
-                    base(moduleSymbol, containingSymbol, ordinal, isByRef, type, handle, customModifiers.Length, out isBad)
+                    base(moduleSymbol, containingSymbol, ordinal, isByRef, type, handle, out isBad)
             {
                 _customModifiers = CSharpCustomModifier.Convert(customModifiers);
-                _countOfCustomModifiersPrecedingByRef = countOfCustomModifiersPrecedingByRef;
 
-                Debug.Assert(_countOfCustomModifiersPrecedingByRef == 0 || isByRef);
-                Debug.Assert(_countOfCustomModifiersPrecedingByRef <= _customModifiers.Length);
+                // TODO: RefCustomModifiers
             }
 
             public override ImmutableArray<CustomModifier> CustomModifiers
@@ -283,14 +312,6 @@ namespace Pchp.CodeAnalysis.Symbols
                     return _customModifiers;
                 }
             }
-
-            //internal override ushort CountOfCustomModifiersPrecedingByRef
-            //{
-            //    get
-            //    {
-            //        return _countOfCustomModifiersPrecedingByRef;
-            //    }
-            //}
         }
 
         public override RefKind RefKind
@@ -424,6 +445,56 @@ namespace Pchp.CodeAnalysis.Symbols
         }
 
         public override bool IsOptional => (_flags & ParameterAttributes.Optional) != 0;
+
+        public override bool HasNotNull
+        {
+            get
+            {
+                if (!_packedFlags.TryGetHasNotNull(out bool value))
+                {
+                    // C# 8.0 Nullability check for reference types
+                    value = !Type.IsValueType && AttributeHelpers.IsNotNullable(this, Handle, (PEModuleSymbol)ContainingModule);
+
+                    _packedFlags.SetHasNotNull(value);
+                }
+
+                return value;
+            }
+        }
+
+        public override bool IsPhpRw
+        {
+            get
+            {
+                const WellKnownAttributeFlags flag = WellKnownAttributeFlags.PhpRw;
+
+                if (!_packedFlags.TryGetWellKnownAttribute(flag, out var value))
+                {
+                    value = _packedFlags.SetWellKnownAttribute(flag, AttributeHelpers.HasPhpRwAttribute(Handle, (PEModuleSymbol)ContainingModule));
+                }
+                return value;
+            }
+        }
+
+        internal override ImportValueAttributeData ImportValueAttributeData
+        {
+            get
+            {
+                var value = _lazyImportValueAttributeData;
+                if (value.IsDefault)
+                {
+                    value = AttributeHelpers.HasImportValueAttribute(Handle, (PEModuleSymbol)ContainingModule);
+                    if (value.IsDefault)
+                    {
+                        value = ImportValueAttributeData.Invalid;
+                    }
+
+                    _lazyImportValueAttributeData = value;
+                }
+
+                return value;
+            }
+        }
 
         //internal override bool IsIDispatchConstant
         //{
@@ -657,7 +728,43 @@ namespace Pchp.CodeAnalysis.Symbols
         {
             get
             {
-                return SpecialParameterSymbol.IsContextParameter(this) || base.IsImplicitlyDeclared;
+                return
+                    SpecialParameterSymbol.IsContextParameter(this) ||
+                    SpecialParameterSymbol.IsLateStaticParameter(this) ||
+                    SpecialParameterSymbol.IsImportValueParameter(this) ||
+                    SpecialParameterSymbol.IsDummyFieldsOnlyCtorParameter(this) ||
+                    base.IsImplicitlyDeclared;
+            }
+        }
+
+        public override FieldSymbol DefaultValueField
+        {
+            get
+            {
+                var field = _lazyDefaultValueField;
+
+                if (!_packedFlags.HasDefaultValueFieldPopulated)
+                {
+                    if (AttributeHelpers.HasDefaultValueAttributeData(Handle, (PEModuleSymbol)ContainingModule))
+                    {
+                        var attr = GetAttributes().FirstOrDefault(attr => attr.AttributeClass.Name == "DefaultValueAttribute");
+                        if (attr != null)
+                        {
+                            // [DefaultValueAttribute( FieldName ) { ExplicitType }]
+                            var fldname = (string)attr.ConstructorArguments[0].Value;
+                            var container = attr.NamedArguments.SingleOrDefault(pair => pair.Key == "ExplicitType").Value.Value as ITypeSymbol
+                                ?? ContainingType;
+
+                            field = container.GetMembers(fldname).OfType<FieldSymbol>().Single();
+                            Debug.Assert(field.IsStatic);
+                            _lazyDefaultValueField = field;
+                        }
+                    }
+
+                    _packedFlags.SetDefaultValueFieldPopulated();
+                }
+
+                return field;
             }
         }
 
@@ -677,86 +784,86 @@ namespace Pchp.CodeAnalysis.Symbols
             }
         }
 
-        //public override ImmutableArray<AttributeData> GetAttributes()
-        //{
-        //    if (_lazyCustomAttributes.IsDefault)
-        //    {
-        //        Debug.Assert(!_handle.IsNil);
-        //        var containingPEModuleSymbol = (PEModuleSymbol)this.ContainingModule;
+        public override ImmutableArray<AttributeData> GetAttributes()
+        {
+            if (_lazyCustomAttributes.IsDefault)
+            {
+                Debug.Assert(!_handle.IsNil);
+                var containingPEModuleSymbol = (PEModuleSymbol)this.ContainingModule;
 
-        //        // Filter out ParamArrayAttributes if necessary and cache
-        //        // the attribute handle for GetCustomAttributesToEmit
-        //        bool filterOutParamArrayAttribute = (!_lazyIsParams.HasValue() || _lazyIsParams.Value());
+                // Filter out ParamArrayAttributes if necessary and cache
+                // the attribute handle for GetCustomAttributesToEmit
+                bool filterOutParamArrayAttribute = (!_lazyIsParams.HasValue() || _lazyIsParams.Value());
 
-        //        ConstantValue defaultValue = this.ExplicitDefaultConstantValue;
-        //        AttributeDescription filterOutConstantAttributeDescription = default(AttributeDescription);
+                ConstantValue defaultValue = this.ExplicitDefaultConstantValue;
+                AttributeDescription filterOutConstantAttributeDescription = default(AttributeDescription);
 
-        //        if ((object)defaultValue != null)
-        //        {
-        //            if (defaultValue.Discriminator == ConstantValueTypeDiscriminator.DateTime)
-        //            {
-        //                filterOutConstantAttributeDescription = AttributeDescription.DateTimeConstantAttribute;
-        //            }
-        //            else if (defaultValue.Discriminator == ConstantValueTypeDiscriminator.Decimal)
-        //            {
-        //                filterOutConstantAttributeDescription = AttributeDescription.DecimalConstantAttribute;
-        //            }
-        //        }
+                if ((object)defaultValue != null)
+                {
+                    if (defaultValue.Discriminator == ConstantValueTypeDiscriminator.DateTime)
+                    {
+                        filterOutConstantAttributeDescription = AttributeDescription.DateTimeConstantAttribute;
+                    }
+                    else if (defaultValue.Discriminator == ConstantValueTypeDiscriminator.Decimal)
+                    {
+                        filterOutConstantAttributeDescription = AttributeDescription.DecimalConstantAttribute;
+                    }
+                }
 
-        //        if (filterOutParamArrayAttribute || filterOutConstantAttributeDescription.Signatures != null)
-        //        {
-        //            CustomAttributeHandle paramArrayAttribute;
-        //            CustomAttributeHandle constantAttribute;
+                if (filterOutParamArrayAttribute || filterOutConstantAttributeDescription.Signatures != null)
+                {
+                    CustomAttributeHandle paramArrayAttribute;
+                    CustomAttributeHandle constantAttribute;
 
-        //            ImmutableArray<AttributeData> attributes =
-        //                containingPEModuleSymbol.GetCustomAttributesForToken(
-        //                    _handle,
-        //                    out paramArrayAttribute,
-        //                    filterOutParamArrayAttribute ? AttributeDescription.ParamArrayAttribute : default(AttributeDescription),
-        //                    out constantAttribute,
-        //                    filterOutConstantAttributeDescription);
+                    ImmutableArray<AttributeData> attributes =
+                        containingPEModuleSymbol.GetCustomAttributesForToken(
+                            _handle,
+                            out paramArrayAttribute,
+                            filterOutParamArrayAttribute ? AttributeDescription.ParamArrayAttribute : default(AttributeDescription),
+                            out constantAttribute,
+                            filterOutConstantAttributeDescription);
 
-        //            if (!paramArrayAttribute.IsNil || !constantAttribute.IsNil)
-        //            {
-        //                var builder = ArrayBuilder<AttributeData>.GetInstance();
+                    if (!paramArrayAttribute.IsNil || !constantAttribute.IsNil)
+                    {
+                        var builder = ArrayBuilder<AttributeData>.GetInstance();
 
-        //                if (!paramArrayAttribute.IsNil)
-        //                {
-        //                    builder.Add(new PEAttributeData(containingPEModuleSymbol, paramArrayAttribute));
-        //                }
+                        if (!paramArrayAttribute.IsNil)
+                        {
+                            builder.Add(new PEAttributeData(containingPEModuleSymbol, paramArrayAttribute));
+                        }
 
-        //                if (!constantAttribute.IsNil)
-        //                {
-        //                    builder.Add(new PEAttributeData(containingPEModuleSymbol, constantAttribute));
-        //                }
+                        if (!constantAttribute.IsNil)
+                        {
+                            builder.Add(new PEAttributeData(containingPEModuleSymbol, constantAttribute));
+                        }
 
-        //                ImmutableInterlocked.InterlockedInitialize(ref _lazyHiddenAttributes, builder.ToImmutableAndFree());
-        //            }
-        //            else
-        //            {
-        //                ImmutableInterlocked.InterlockedInitialize(ref _lazyHiddenAttributes, ImmutableArray<CSharpAttributeData>.Empty);
-        //            }
+                        ImmutableInterlocked.InterlockedInitialize(ref _lazyHiddenAttributes, builder.ToImmutableAndFree());
+                    }
+                    else
+                    {
+                        ImmutableInterlocked.InterlockedInitialize(ref _lazyHiddenAttributes, ImmutableArray<AttributeData>.Empty);
+                    }
 
-        //            if (!_lazyIsParams.HasValue())
-        //            {
-        //                Debug.Assert(filterOutParamArrayAttribute);
-        //                _lazyIsParams = (!paramArrayAttribute.IsNil).ToThreeState();
-        //            }
+                    if (!_lazyIsParams.HasValue())
+                    {
+                        Debug.Assert(filterOutParamArrayAttribute);
+                        _lazyIsParams = (!paramArrayAttribute.IsNil).ToThreeState();
+                    }
 
-        //            ImmutableInterlocked.InterlockedInitialize(
-        //                ref _lazyCustomAttributes,
-        //                attributes);
-        //        }
-        //        else
-        //        {
-        //            ImmutableInterlocked.InterlockedInitialize(ref _lazyHiddenAttributes, ImmutableArray<CSharpAttributeData>.Empty);
-        //            containingPEModuleSymbol.LoadCustomAttributes(_handle, ref _lazyCustomAttributes);
-        //        }
-        //    }
+                    ImmutableInterlocked.InterlockedInitialize(
+                        ref _lazyCustomAttributes,
+                        attributes);
+                }
+                else
+                {
+                    ImmutableInterlocked.InterlockedInitialize(ref _lazyHiddenAttributes, ImmutableArray<AttributeData>.Empty);
+                    containingPEModuleSymbol.LoadCustomAttributes(_handle, ref _lazyCustomAttributes);
+                }
+            }
 
-        //    Debug.Assert(!_lazyHiddenAttributes.IsDefault);
-        //    return _lazyCustomAttributes;
-        //}
+            Debug.Assert(!_lazyHiddenAttributes.IsDefault);
+            return _lazyCustomAttributes;
+        }
 
         internal override IEnumerable<AttributeData> GetCustomAttributesToEmit(CommonModuleCompilationState compilationState)
         {

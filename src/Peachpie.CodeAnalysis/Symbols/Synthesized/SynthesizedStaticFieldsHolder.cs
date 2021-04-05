@@ -29,7 +29,7 @@ namespace Pchp.CodeAnalysis.Symbols
         /// <summary>
         /// Gets enumeration of fields that will be emitted within this holder.
         /// </summary>
-        internal IEnumerable<SourceFieldSymbol> Fields => _class.GetMembers().OfType<SourceFieldSymbol>().Where(f => f.RequiresHolder);
+        internal IEnumerable<FieldSymbol> Fields => _class.GetDeclaredMembers().OfType<FieldSymbol>().Where(PhpFieldSymbolExtension.IsInStaticsHolder);
 
         /// <summary>
         /// Gets value indicating whether there are fields or constants.
@@ -42,13 +42,17 @@ namespace Pchp.CodeAnalysis.Symbols
 
         public override int Arity => 0;
 
+        internal override bool HasTypeArgumentsCustomModifiers => false;
+
+        public override ImmutableArray<CustomModifier> GetTypeArgumentCustomModifiers(int ordinal) => GetEmptyTypeArgumentCustomModifiers(ordinal);
+
         public override NamedTypeSymbol BaseType => DeclaringCompilation.CoreTypes.Object;
 
         public override Symbol ContainingSymbol => _class;
 
         public override NamedTypeSymbol ContainingType => _class;
 
-        public override Accessibility DeclaredAccessibility => Accessibility.Public;
+        public override Accessibility DeclaredAccessibility => Accessibility.Public; // TODO: Accessibility.Private; Generate stubs "get|set field(Context)" in containing class to access these fields
 
         public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences
         {
@@ -64,13 +68,7 @@ namespace Pchp.CodeAnalysis.Symbols
 
         public override bool IsStatic => false;
 
-        public override ImmutableArray<Location> Locations
-        {
-            get
-            {
-                throw new NotImplementedException();
-            }
-        }
+        public override bool IsSerializable => false;
 
         public override TypeKind TypeKind => TypeKind.Class;
 
@@ -90,8 +88,10 @@ namespace Pchp.CodeAnalysis.Symbols
 
         public override ImmutableArray<Symbol> GetMembers() => Fields.AsImmutable<Symbol>();
 
-        public override ImmutableArray<Symbol> GetMembers(string name) => Fields.Where(f => f.Name.EqualsOrdinalIgnoreCase(name)).AsImmutable<Symbol>();
-        
+        public override ImmutableArray<Symbol> GetMembers(string name) => Fields.Where(f => f.Name == name).AsImmutable<Symbol>();
+
+        public override ImmutableArray<Symbol> GetMembersByPhpName(string name) => Fields.Where(f => f.Name.StringsEqual(name, ignoreCase: true)).AsImmutable<Symbol>();
+
         public override ImmutableArray<NamedTypeSymbol> GetTypeMembers() => ImmutableArray<NamedTypeSymbol>.Empty;
 
         public override ImmutableArray<NamedTypeSymbol> GetTypeMembers(string name) => GetTypeMembers();
@@ -102,7 +102,7 @@ namespace Pchp.CodeAnalysis.Symbols
 
         internal override ImmutableArray<NamedTypeSymbol> GetInterfacesToEmit()
         {
-            if (Fields.Any(f => f.RequiresContext))
+            if (Fields.Any(PhpFieldSymbolExtension.RequiresContext))
             {
                 // we need Init(Context) method
                 return ImmutableArray.Create(DeclaringCompilation.CoreTypes.IStaticInit.Symbol);
@@ -111,6 +111,14 @@ namespace Pchp.CodeAnalysis.Symbols
             {
                 return ImmutableArray<NamedTypeSymbol>.Empty;
             }
+        }
+
+        public override ImmutableArray<AttributeData> GetAttributes()
+        {
+            // [CompilerGenerated]
+            return ImmutableArray.Create(
+                DeclaringCompilation.CreateCompilerGeneratedAttribute()
+                );
         }
 
         #endregion

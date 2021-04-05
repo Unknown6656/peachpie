@@ -1,4 +1,6 @@
 ﻿using Microsoft.CodeAnalysis;
+using Pchp.CodeAnalysis.Semantics;
+using Peachpie.CodeAnalysis.Symbols;
 using Roslyn.Utilities;
 using System;
 using System.Collections.Generic;
@@ -28,7 +30,7 @@ namespace Pchp.CodeAnalysis.Symbols
 
         protected override Symbol OriginalSymbolDefinition => this;
 
-        public sealed override bool Equals(object obj)
+        public sealed override bool Equals(ISymbol obj, SymbolEqualityComparer equalityComparer)
         {
             if ((object)this == obj)
             {
@@ -40,10 +42,9 @@ namespace Pchp.CodeAnalysis.Symbols
             // define it on the base type because most can simply use
             // ReferenceEquals.
 
-            var other = obj as WrappedParameterSymbol;
-            return (object)other != null &&
+            return obj is WrappedParameterSymbol other &&
                 this.Ordinal == other.Ordinal &&
-                this.ContainingSymbol.Equals(other.ContainingSymbol);
+                SymbolEqualityComparer.Default.Equals(this.ContainingSymbol, other.ContainingSymbol);
         }
 
         public sealed override int GetHashCode()
@@ -53,15 +54,13 @@ namespace Pchp.CodeAnalysis.Symbols
 
         #region Forwarded
 
-        internal override TypeSymbol Type
-        {
-            get { return underlyingParameter.Type; }
-        }
+        public override BoundExpression Initializer => underlyingParameter.Initializer;
 
-        public sealed override RefKind RefKind
-        {
-            get { return underlyingParameter.RefKind; }
-        }
+        public override FieldSymbol DefaultValueField => underlyingParameter.DefaultValueField;
+
+        internal override TypeSymbol Type => underlyingParameter.Type;
+
+        public sealed override RefKind RefKind => underlyingParameter.RefKind;
 
         //internal sealed override bool IsMetadataIn
         //{
@@ -132,6 +131,12 @@ namespace Pchp.CodeAnalysis.Symbols
         {
             get { return underlyingParameter.CustomModifiers; }
         }
+
+        internal override ImportValueAttributeData ImportValueAttributeData => underlyingParameter.ImportValueAttributeData;
+
+        public override bool HasNotNull => underlyingParameter.HasNotNull;
+
+        public override bool IsPhpRw => underlyingParameter.IsPhpRw;
 
         //internal override MarshalPseudoCustomAttributeData MarshallingInformation
         //{

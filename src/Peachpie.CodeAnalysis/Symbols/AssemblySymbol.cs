@@ -9,10 +9,12 @@ using System.Globalization;
 using System.Threading;
 using Roslyn.Utilities;
 using System.Diagnostics;
+using System.Reflection;
+using Microsoft.CodeAnalysis.Symbols;
 
 namespace Pchp.CodeAnalysis.Symbols
 {
-    internal abstract class AssemblySymbol : Symbol, IAssemblySymbol
+    internal abstract class AssemblySymbol : Symbol, IAssemblySymbol, IAssemblySymbolInternal
     {
         AssemblySymbol _corLibrary;
 
@@ -39,6 +41,26 @@ namespace Pchp.CodeAnalysis.Symbols
         public abstract AssemblyIdentity Identity { get; }
 
         /// <summary>
+        /// Assembly version pattern with wildcards represented by <see cref="ushort.MaxValue"/>,
+        /// or null if the version string specified in the <see cref="AssemblyVersionAttribute"/> doesn't contain a wildcard.
+        /// 
+        /// For example, 
+        ///   AssemblyVersion("1.2.*") is represented as 1.2.65535.65535,
+        ///   AssemblyVersion("1.2.3.*") is represented as 1.2.3.65535.
+        /// </summary>
+        public abstract Version AssemblyVersionPattern { get; }
+
+        /// <summary>
+        /// Does this symbol represent a missing assembly.
+        /// </summary>
+        internal virtual bool IsMissing => false;
+
+        /// <summary>
+        /// Assembly is /l-ed by compilation that is using it as a reference.
+        /// </summary>
+        internal abstract bool IsLinked { get; }
+
+        /// <summary>
         /// The system assembly, which provides primitive types like Object, String, etc., e.g. mscorlib.dll. 
         /// The value is MissingAssemblySymbol if none of the referenced assemblies can be used as a source for the 
         /// primitive types and the owning assembly cannot be used as the source too. Otherwise, it is one of 
@@ -58,13 +80,13 @@ namespace Pchp.CodeAnalysis.Symbols
         /// </summary>
         internal void SetCorLibrary(AssemblySymbol corLibrary)
         {
-            Debug.Assert((object)_corLibrary == null);
+            Debug.Assert((object)_corLibrary == null || (object)_corLibrary == corLibrary);
             _corLibrary = corLibrary;
         }
 
         public virtual bool IsCorLibrary => false;
 
-        public virtual bool IsPchpCorLibrary => false;
+        public virtual bool IsPeachpieCorLibrary => false;
 
         public override bool IsAbstract => false;
 
@@ -253,7 +275,7 @@ namespace Pchp.CodeAnalysis.Symbols
         /// Lookup member declaration in predefined CorLib type in this Assembly. Only valid if this 
         /// assembly is the Cor Library
         /// </summary>
-        internal Symbol GetDeclaredSpecialTypeMember(SpecialMember member)
+        internal virtual Symbol GetDeclaredSpecialTypeMember(SpecialMember member)
         {
             if (_lazySpecialTypeMembers == null || ReferenceEquals(_lazySpecialTypeMembers[(int)member], ErrorTypeSymbol.UnknownResultType))
             {
@@ -283,6 +305,14 @@ namespace Pchp.CodeAnalysis.Symbols
 
             return _lazySpecialTypeMembers[(int)member];
         }
+
+        /// <summary>
+        /// Return an array of assemblies referenced by this assembly, which are linked (/l-ed) by 
+        /// each compilation that is using this AssemblySymbol as a reference. 
+        /// If this AssemblySymbol is linked too, it will be in this array too.
+        /// </summary>
+        internal abstract ImmutableArray<AssemblySymbol> GetLinkedReferencedAssemblies();
+        internal abstract void SetLinkedReferencedAssemblies(ImmutableArray<AssemblySymbol> assemblies);
 
         public virtual bool GivesAccessTo(IAssemblySymbol toAssembly)
         {
@@ -338,6 +368,11 @@ namespace Pchp.CodeAnalysis.Symbols
         internal virtual NamedTypeSymbol TryLookupForwardedMetadataTypeWithCycleDetection(ref MetadataTypeName emittedName, ConsList<AssemblySymbol> visitedAssemblies)
         {
             return null;
+        }
+
+        ImmutableArray<INamedTypeSymbol> IAssemblySymbol.GetForwardedTypes()
+        {
+            throw new NotImplementedException();
         }
     }
 }

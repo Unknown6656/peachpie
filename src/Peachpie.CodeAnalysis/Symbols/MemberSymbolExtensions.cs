@@ -14,12 +14,6 @@ namespace Pchp.CodeAnalysis.Symbols
     /// </summary>
     internal static partial class SymbolExtensions
     {
-        internal static bool HasParamsParameter(this Symbol member)
-        {
-            var @params = member.GetParameters();
-            return !@params.IsEmpty && @params.Last().IsParams;
-        }
-
         /// <summary>
         /// Get the parameters of a member symbol.  Should be a method, property, or event.
         /// </summary>
@@ -232,8 +226,8 @@ namespace Pchp.CodeAnalysis.Symbols
                     return ((FieldSymbol)s).AsMember(newOwner);
                 case SymbolKind.Method:
                     return ((MethodSymbol)s).AsMember(newOwner);
-                //case SymbolKind.NamedType:
-                //    return ((NamedTypeSymbol)s).AsMember(newOwner);
+                case SymbolKind.NamedType:
+                    return ((NamedTypeSymbol)s).AsMember(newOwner);
                 case SymbolKind.Property:
                     return ((PropertySymbol)s).AsMember(newOwner);
                 //case SymbolKind.Event:
@@ -464,6 +458,10 @@ namespace Pchp.CodeAnalysis.Symbols
         {
             switch (member.Kind)
             {
+                case SymbolKind.Local:
+                    returnType = (TypeSymbol)((ILocalSymbol)member).Type;
+                    returnTypeCustomModifiers = ImmutableArray<CustomModifier>.Empty;
+                    break;
                 case SymbolKind.Field:
                     FieldSymbol field = (FieldSymbol)member;
                     returnType = field.Type;
@@ -485,6 +483,11 @@ namespace Pchp.CodeAnalysis.Symbols
                     //returnType = @event.Type;
                     //returnTypeCustomModifiers = ImmutableArray<CustomModifier>.Empty;
                     //break;
+                case SymbolKind.Parameter:
+                    var p = (ParameterSymbol)member;
+                    returnType = p.Type;
+                    returnTypeCustomModifiers = p.CustomModifiers;
+                    break;
                 default:
                     throw ExceptionUtilities.UnexpectedValue(member.Kind);
             }

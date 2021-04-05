@@ -5,6 +5,10 @@ using System.Collections.Immutable;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using System.Diagnostics;
+using Peachpie.CodeAnalysis.Utilities;
+using System.Collections.Concurrent;
+using Pchp.CodeAnalysis.Utilities;
 
 namespace Pchp.CodeAnalysis.Semantics.Graph
 {
@@ -12,17 +16,39 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
     {
         /// <summary>
         /// Initial block flow state.
-        /// Can be <c>null</c> in case there is no flow into the block or the state was released.
+        /// Can be <c>null</c> in case there is no flow into the block, the state was released, or
+        /// doesn't match the current version of the analysis.
         /// </summary>
         internal FlowState FlowState
         {
-            get; set;
+            get
+            {
+                return (_flowState != null && _flowState.Version == _flowState.FlowContext.Version) ? _flowState : null;
+            }
+            set
+            {
+                _flowState = value;
+            }
+        }
+
+        FlowState _flowState;
+
+        /// <summary>
+        /// Comparer to sort the blocks in the ascending order of <see cref="Ordinal"/>.
+        /// </summary>
+        internal sealed class OrdinalComparer : IComparer<BoundBlock>, IEqualityComparer<BoundBlock>
+        {
+            int IEqualityComparer<BoundBlock>.GetHashCode(BoundBlock obj) => obj.GetHashCode();
+
+            bool IEqualityComparer<BoundBlock>.Equals(BoundBlock x, BoundBlock y) => object.ReferenceEquals(x, y);
+
+            int IComparer<BoundBlock>.Compare(BoundBlock x, BoundBlock y) => x.Ordinal - y.Ordinal;
         }
     }
 
     partial class ExitBlock
     {
-        #region Callers // TODO: EdgeToCallers
+        #region Callers
 
         /// <summary>
         /// Subscribe a block to be analysed when the exit block is reached and the routine return value changes.
@@ -30,12 +56,20 @@ namespace Pchp.CodeAnalysis.Semantics.Graph
         internal void Subscribe(BoundBlock x)
         {
             if (_subscribers == null)
-                _subscribers = new HashSet<BoundBlock>();
+            {
+                lock (this)
+                {
+                    _subscribers = _subscribers ?? new HashSet<BoundBlock>();
+                }
+            }
 
-            _subscribers.Add(x);
+            lock (_subscribers)
+            {
+                _subscribers.Add(x);
+            }
         }
 
-        internal IEnumerable<BoundBlock> Subscribers => (IEnumerable<BoundBlock>)_subscribers ?? ImmutableArray<BoundBlock>.Empty;
+        internal ICollection<BoundBlock> Subscribers => (ICollection<BoundBlock>)_subscribers ?? Array.Empty<BoundBlock>();
 
         /// <summary>
         /// Set of blocks making call to this routine (callers) (may be from another CFG) waiting for return type of this routine.

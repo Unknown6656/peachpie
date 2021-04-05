@@ -1,6 +1,7 @@
 ﻿using Devsense.PHP.Syntax;
+using Devsense.PHP.Text;
 using Microsoft.CodeAnalysis;
-using Microsoft.CodeAnalysis.Semantics;
+using Microsoft.CodeAnalysis.Operations;
 using Pchp.CodeAnalysis.Symbols;
 using Roslyn.Utilities;
 using System;
@@ -11,11 +12,75 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 using AST = Devsense.PHP.Syntax.Ast;
+using Pchp.CodeAnalysis.Semantics.Graph;
+using Pchp.CodeAnalysis.FlowAnalysis;
+using Pchp.CodeAnalysis.Semantics.TypeRef;
+using Peachpie.CodeAnalysis.Syntax;
 
 namespace Pchp.CodeAnalysis.Semantics
 {
     /// <summary>
+    /// Holds currently bound item and optionally the first and the last BoundBlock containing all the statements that are supposed to go before the BoundElement. 
+    /// </summary>
+    /// <typeparam name="T">Either <c>BoundExpression</c> or <c>BoundStatement</c>.</typeparam>
+    public struct BoundItemsBag<T> : IEquatable<BoundItemsBag<T>> where T : class, IPhpOperation
+    {
+        public BoundBlock PreBoundBlockFirst { get; private set; }
+        public BoundBlock PreBoundBlockLast { get; private set; }
+
+        public T BoundElement { get; private set; }
+
+        public BoundItemsBag(T bound, BoundBlock preBoundFirst = null, BoundBlock preBoundLast = null)
+        {
+            Debug.Assert(bound != null || (preBoundFirst == null && preBoundLast == null));
+            Debug.Assert(preBoundFirst != null || preBoundLast == null);
+
+            PreBoundBlockFirst = preBoundFirst;
+            PreBoundBlockLast = preBoundLast ?? preBoundFirst;
+            BoundElement = bound;
+        }
+
+        /// <summary>
+        /// An empty bag with no item and no pre-bound blocks.
+        /// </summary>
+        public static BoundItemsBag<T> Empty => new BoundItemsBag<T>(null);
+
+        /// <summary>
+        /// Returns bound element and asserts that there are no <c>PreBoundStatements</c>.
+        /// </summary>
+        public T SingleBoundElement()
+        {
+            if (!IsOnlyBoundElement)
+            {
+                throw new InvalidOperationException();
+            }
+
+            return BoundElement;
+        }
+
+        public static implicit operator BoundItemsBag<T>(T item) => new BoundItemsBag<T>(item);
+
+        public bool IsEmpty => IsOnlyBoundElement && BoundElement == null;
+
+        public bool IsOnlyBoundElement => PreBoundBlockFirst == null;
+
+        public bool Equals(BoundItemsBag<T> b) =>
+            BoundElement == b.BoundElement &&
+            PreBoundBlockFirst == b.PreBoundBlockFirst &&
+            PreBoundBlockLast == b.PreBoundBlockLast;
+
+        public override int GetHashCode() => BoundElement != null ? BoundElement.GetHashCode() : -1;
+
+        public override bool Equals(object obj) => obj is BoundItemsBag<T> bag && Equals(bag);
+
+        public static bool operator ==(BoundItemsBag<T> a, BoundItemsBag<T> b) => a.Equals(b);
+
+        public static bool operator !=(BoundItemsBag<T> a, BoundItemsBag<T> b) => !a.Equals(b);
+    }
+
+    /// <summary>
     /// Binds syntax nodes (<see cref="AST.LangElement"/>) to semantic nodes (<see cref="IOperation"/>).
+    /// Creates unbound nodes.
     /// </summary>
     internal class SemanticsBinder
     {
@@ -23,132 +88,520 @@ namespace Pchp.CodeAnalysis.Semantics
         /// Optional. Local variables table.
         /// Can be <c>null</c> for expressions without variable access (field initializers and parameters initializers).
         /// </summary>
-        readonly LocalsTable _locals;
+        protected readonly LocalsTable _locals;
+
+        /// <summary>
+        /// Optional. Self type context.
+        /// </summary>
+        public SourceTypeSymbol Self { get; }
+
+        /// <summary>
+        /// Containing file symbol.
+        /// </summary>
+        public SyntaxTree ContainingFile { get; }
+
+        /// <summary>
+        /// Gets corresponding routine.
+        /// Can be <c>null</c>.
+        /// </summary>
+        public SourceRoutineSymbol Routine => _routine ?? _locals?.Routine;
+        readonly SourceRoutineSymbol _routine;
+
+        /// <summary>
+        /// Found yield statements (needed for ControlFlowGraph)
+        /// </summary>
+        public virtual ImmutableArray<BoundYieldStatement> Yields { get => ImmutableArray<BoundYieldStatement>.Empty; }
+
+        /// <summary>
+        /// Generated state machine states.
+        /// </summary>
+        public virtual int StatesCount => 0;
+
+        /// <summary>
+        /// Bag with semantic diagnostics.
+        /// </summary>
+        public DiagnosticBag Diagnostics => DeclaringCompilation.DeclarationDiagnostics;
+
+        /// <summary>
+        /// Compilation.
+        /// </summary>
+        internal PhpCompilation DeclaringCompilation { get; }
+
+        /// <summary>Gets <see cref="BoundTypeRefFactory"/> instance.</summary>
+        internal BoundTypeRefFactory BoundTypeRefFactory => DeclaringCompilation.TypeRefFactory;
+
+        /// <summary>
+        /// Gets value determining whether to compile <c>assert</c>. otherwise the expression is ignored.
+        /// </summary>
+        bool EnableAssertExpression => Routine != null && Routine.DeclaringCompilation.Options.DebugPlusMode;
+
+        int _tmpVariableIndex = 0;
+
+        protected string NextTempVariableName() => "<sm>'" + _tmpVariableIndex++;
+
+        protected string NextMatchVariableName() => "<match>'" + _tmpVariableIndex++;
 
         #region Construction
 
-        public SemanticsBinder(LocalsTable locals = null)
+        /// <summary>
+        /// Creates <see cref="SemanticsBinder"/> for given routine (passed with <paramref name="locals"/>).
+        /// </summary>
+        /// <param name="file">Containing file.</param>
+        /// <param name="locals">Table of local variables within routine.</param>
+        /// <param name="self">Current self context.</param>
+        /// <param name="compilation">Declaring compilation.</param>
+        public static SemanticsBinder Create(PhpCompilation compilation, SyntaxTree file, LocalsTable locals, SourceTypeSymbol self = null)
         {
-            _locals = locals;
+            Debug.Assert(locals != null);
+
+            var routine = locals.Routine;
+            Debug.Assert(routine != null);
+
+            // try to get yields from current routine
+            routine.Syntax.Properties.TryGetProperty(out ImmutableArray<AST.IYieldLikeEx> yields);  // routine binder sets this property
+
+            var isGeneratorMethod = !yields.IsDefaultOrEmpty;
+
+            //
+            return (isGeneratorMethod)
+                ? new GeneratorSemanticsBinder(compilation, yields, locals, routine, self)
+                : new SemanticsBinder(compilation, file, locals, routine, self);
         }
+
+        public SemanticsBinder(PhpCompilation compilation, SyntaxTree file, LocalsTable locals = null, SourceRoutineSymbol routine = null, SourceTypeSymbol self = null)
+        {
+            DeclaringCompilation = compilation;
+
+            ContainingFile = file;
+            _locals = locals;
+            _routine = routine;
+            Self = self;
+        }
+
+        /// <summary>
+        /// Provides binder with CFG builder.
+        /// </summary>
+        public virtual void SetupBuilder(Func<BoundBlock> newBlockFunc)
+        { }
 
         #endregion
 
         #region Helpers
 
-        public IEnumerable<BoundStatement> BindStatements(IEnumerable<AST.Statement> statements)
+        protected ImmutableArray<BoundStatement> BindStatements(IEnumerable<AST.Statement> statements)
         {
-            return statements.Select(BindStatement);
+            return statements.Select(BindStatement).ToImmutableArray();
         }
 
-        public ImmutableArray<BoundExpression> BindExpressions(IEnumerable<AST.Expression> expressions)
+        protected ImmutableArray<BoundExpression> BindExpressions(IEnumerable<AST.Expression> expressions)
         {
             return expressions.Select(BindExpression).ToImmutableArray();
         }
 
-        BoundExpression BindExpression(AST.Expression expr) => BindExpression(expr, BoundAccess.Read);
+        protected BoundExpression BindExpression(AST.Expression expr) => BindExpression(expr, BoundAccess.Read);
 
-        ImmutableArray<BoundArgument> BindArguments(IEnumerable<AST.Expression> expressions)
+        protected BoundArgument BindArgument(AST.Expression expr, bool isByRef = false, bool isUnpack = false, string name = null)
         {
-            return BindExpressions(expressions)
-                .Select(x => new BoundArgument(x))
-                .ToImmutableArray();
+            //if (isUnpack)
+            //{
+            //    // remove:
+            //    _diagnostics.Add(_locals.Routine, expr, Errors.ErrorCode.ERR_NotYetImplemented, "Parameter unpacking");
+            //}
+
+            var bound = BindExpression(expr, isByRef ? BoundAccess.ReadRef : BoundAccess.Read);
+            Debug.Assert(!isUnpack || !isByRef);
+
+            return isUnpack
+                ? BoundArgument.CreateUnpacking(bound, name)
+                : BoundArgument.Create(bound, name);
         }
 
-        ImmutableArray<BoundArgument> BindArguments(IEnumerable<AST.ActualParam> parameters)
+        protected ImmutableArray<BoundArgument> BindArguments(params AST.Expression[] expressions)
         {
-            if (parameters.Any(p => p.IsUnpack || p.Ampersand))
-                throw new NotImplementedException();
+            Debug.Assert(expressions != null);
 
-            return BindExpressions(parameters.Select(p => p.Expression))
-                .Select(x => new BoundArgument(x))
-                .ToImmutableArray();
+            if (expressions.Length == 0)
+            {
+                return ImmutableArray<BoundArgument>.Empty;
+            }
+
+            //
+            var arguments = new BoundArgument[expressions.Length];
+            for (int i = 0; i < expressions.Length; i++)
+            {
+                var expr = expressions[i];
+                arguments[i] = BindArgument(expr);
+            }
+
+            //
+            return ImmutableArray.Create(arguments);
+        }
+
+        protected ImmutableArray<BoundArgument> BindArguments(params AST.ActualParam[] parameters)
+        {
+            // trim trailing empty parameters (PHP >=7.3)
+            var pcount = parameters != null ? parameters.Length : 0;
+
+            while (pcount > 0 && parameters[pcount - 1].Expression == null)
+            {
+                pcount--;
+            }
+
+            //
+            if (pcount == 0)
+            {
+                return ImmutableArray<BoundArgument>.Empty;
+            }
+
+            //
+            var unpacking = false;
+            var arguments = new BoundArgument[pcount];
+            for (int i = 0; i < pcount; i++)
+            {
+                var p = parameters[i];
+                var arg = BindArgument(p.Expression, p.Ampersand, p.IsUnpack, p.IsNamedArgument ? p.Name.Value.Name.Value : null);
+
+                //
+                arguments[i] = arg;
+
+                // check the unpacking is not used before normal arguments:
+                if (arg.IsUnpacking)
+                {
+                    unpacking = true;
+                }
+                else
+                {
+                    if (unpacking)
+                    {
+                        // https://wiki.php.net/rfc/argument_unpacking
+                        Diagnostics.Add(GetLocation(p), Errors.ErrorCode.ERR_PositionalArgAfterUnpacking);
+                    }
+                }
+            }
+
+            //
+            return ImmutableArray.Create(arguments);
+        }
+
+        protected ImmutableArray<BoundArgument> BindLambdaUseArguments(IList<AST.FormalParam> usevars)
+        {
+            if (usevars != null && usevars.Count != 0)
+            {
+                return usevars.SelectAsArray(v =>
+                {
+                    var varuse = new AST.DirectVarUse(v.Name.Span, v.Name.Name);
+                    var boundvar = BindExpression(varuse, v.PassedByRef ? BoundAccess.ReadRef : BoundAccess.Read);
+
+                    return BoundArgument.Create(boundvar);
+                });
+            }
+            else
+            {
+                return ImmutableArray<BoundArgument>.Empty;
+            }
+        }
+
+        protected Location GetLocation(AST.ITreeNode expr) => ContainingFile.GetLocation(expr);
+
+        #endregion
+
+        #region Attributes
+
+        public ImmutableArray<AttributeData> BindAttributes(IReadOnlyList<AST.IAttributeGroup> groups)
+        {
+            if (groups == null || groups.Count == 0)
+            {
+                return ImmutableArray<AttributeData>.Empty;
+            }
+
+            var attrs = new List<AttributeData>();
+
+            foreach (var g in groups)
+            {
+                foreach (var a in g.Attributes)
+                {
+                    var attribute = new SourceCustomAttribute(
+                        DeclaringCompilation,
+                        Self,
+                        BoundTypeRefFactory.CreateFromTypeRef(a.ClassRef, this, Self),
+                        BindArguments(a.CallSignature.Parameters));
+
+                    attrs.Add(attribute);
+                }
+            }
+
+
+            return attrs.ToImmutableArray();
         }
 
         #endregion
 
-        public BoundStatement BindStatement(AST.Statement stmt)
+        public virtual void WithTryScopes(IEnumerable<TryCatchEdge> tryScopes) { }
+
+        public virtual BoundItemsBag<BoundStatement> BindWholeStatement(AST.Statement stmt) => BindStatement(stmt);
+
+        protected virtual BoundStatement BindStatement(AST.Statement stmt) => BindStatementCore(stmt).WithSyntax(stmt);
+
+        BoundStatement BindStatementCore(AST.Statement stmt)
         {
             Debug.Assert(stmt != null);
 
-            if (stmt is AST.EchoStmt) return new BoundExpressionStatement(new BoundEcho(BindArguments(((AST.EchoStmt)stmt).Parameters))) { PhpSyntax = stmt };
-            if (stmt is AST.ExpressionStmt) return new BoundExpressionStatement(BindExpression(((AST.ExpressionStmt)stmt).Expression, BoundAccess.None)) { PhpSyntax = stmt };
-            if (stmt is AST.JumpStmt) return BindJumpStmt((AST.JumpStmt)stmt);
-            if (stmt is AST.FunctionDecl) return new BoundFunctionDeclStatement(stmt.GetProperty<SourceFunctionSymbol>());  // see SourceDeclarations.PopulatorVisitor
-            if (stmt is AST.TypeDecl) return new BoundTypeDeclStatement(stmt.GetProperty<SourceTypeSymbol>());  // see SourceDeclarations.PopulatorVisitor
-            if (stmt is AST.GlobalStmt) return new BoundGlobalVariableStatement(
-                ((AST.GlobalStmt)stmt).VarList.Cast<AST.DirectVarUse>()
-                    .Select(s => (BoundGlobalVariable)_locals.BindVariable(s.VarName, VariableKind.GlobalVariable, null))
-                    .ToImmutableArray());
-            if (stmt is AST.StaticStmt) return new BoundStaticVariableStatement(
-                ((AST.StaticStmt)stmt).StVarList
-                    .Select(s => (BoundStaticLocal)_locals.BindVariable(s.Variable, VariableKind.StaticVariable,
-                        () => (s.Initializer != null ? BindExpression(s.Initializer) : null)))
-                    .ToImmutableArray())
-            { PhpSyntax = stmt };
-            if (stmt is AST.UnsetStmt) return new BoundUnset(
-                ((AST.UnsetStmt)stmt).VarList
-                    .Select(v => (BoundReferenceExpression)BindExpression(v, BoundAccess.Unset))
-                    .ToImmutableArray())
-            { PhpSyntax = stmt };
-            if (stmt is AST.ThrowStmt) return new BoundThrowStatement(BindExpression(((AST.ThrowStmt)stmt).Expression, BoundAccess.Read)) { PhpSyntax = stmt };
+            if (stmt is AST.EchoStmt echoStm) return BindEcho(echoStm, BindArguments(echoStm.Parameters));
+            if (stmt is AST.ExpressionStmt exprStm) return new BoundExpressionStatement(BindExpression(exprStm.Expression, BoundAccess.None));
+            if (stmt is AST.JumpStmt jmpStm) return BindJumpStmt(jmpStm);
+            if (stmt is AST.FunctionDecl) return new BoundFunctionDeclStatement(stmt.GetProperty<SourceFunctionSymbol>());
+            if (stmt is AST.TypeDecl) return new BoundTypeDeclStatement(stmt.GetProperty<SourceTypeSymbol>());
+            if (stmt is AST.GlobalStmt glStmt) return BindGlobalStmt(glStmt);
+            if (stmt is AST.StaticStmt staticStm) return BindStaticStmt(staticStm);
+            if (stmt is AST.UnsetStmt unsetStm) return BindUnsetStmt(unsetStm);
             if (stmt is AST.PHPDocStmt) return new BoundEmptyStatement();
+            if (stmt is AST.DeclareStmt declareStm) return new BoundDeclareStatement();
 
-            throw new NotImplementedException(stmt.GetType().FullName);
+            //
+            Diagnostics.Add(GetLocation(stmt), Errors.ErrorCode.ERR_NotYetImplemented, $"Statement of type '{stmt.GetType().Name}'");
+            return new BoundEmptyStatement(stmt.Span.ToTextSpan());
         }
 
-        BoundStatement BindJumpStmt(AST.JumpStmt stmt)
+        BoundStatement BindEcho(AST.EchoStmt stmt, ImmutableArray<BoundArgument> args)
         {
-            if (stmt.Type == AST.JumpStmt.Types.Return)
+            return new BoundExpressionStatement(
+                new BoundEcho(args)
+                .WithAccess(BoundAccess.None)
+                .WithSyntax(stmt));
+        }
+
+        BoundStatement BindUnsetStmt(AST.UnsetStmt stmt)
+        {
+            if (stmt.VarList.Count == 1)
             {
-                return new BoundReturnStatement(
-                    (stmt.Expression != null)
-                        ? BindExpression(stmt.Expression, BoundAccess.Read)   // ReadRef in case routine returns an aliased value
-                        : null)
-                { PhpSyntax = stmt };
+                return BindUnsetStmt(stmt.VarList[0]);
+            }
+            else
+            {
+                return new BoundBlock(
+                    stmt.VarList
+                        .Select(BindUnsetStmt)
+                        .ToList()
+                    );
+            }
+        }
+
+        BoundStatement BindUnsetStmt(AST.VariableUse varuse)
+        {
+            Debug.Assert(varuse != null);
+            return new BoundUnset((BoundReferenceExpression)BindExpression(varuse, BoundAccess.Unset));
+        }
+
+        BoundStatement BindGlobalStmt(AST.SimpleVarUse varuse)
+        {
+            if (varuse is AST.DirectVarUse dvar && dvar.VarName.IsAutoGlobal)
+            {
+                // do not bind superglobals
+                return new BoundEmptyStatement(dvar.Span.ToTextSpan());
             }
 
-            throw ExceptionUtilities.Unreachable;
+            return new BoundGlobalVariableStatement(
+                new BoundVariableRef(BindVariableName(varuse))
+                    .WithSyntax(varuse)
+                    .WithAccess(BoundAccess.Write.WithWriteRef(TypeRefMask.AnyType)))
+                .WithSyntax(varuse);
+        }
+
+        protected BoundStatement BindGlobalStmt(AST.GlobalStmt stmt)
+        {
+            if (stmt.VarList.Count == 1)
+            {
+                return BindGlobalStmt(stmt.VarList[0]);
+            }
+            else
+            {
+                return new BoundBlock(
+                    stmt.VarList
+                        .Select(BindGlobalStmt)
+                        .ToList()
+                    );
+            }
+        }
+
+        protected BoundStatement BindStaticStmt(AST.StaticVarDecl decl)
+        {
+            return new BoundStaticVariableStatement(new BoundStaticVariableStatement.StaticVarDecl()
+            {
+                Variable = _locals.BindLocalVariable(decl.Variable, decl.Span.ToTextSpan()),
+                InitialValue = (decl.Initializer != null) ? BindExpression(decl.Initializer) : null,
+            },
+            new SynthesizedStaticLocHolder(this.Routine, decl.Variable.Value));
+        }
+
+        protected BoundStatement BindStaticStmt(AST.StaticStmt stmt)
+        {
+            if (stmt.StVarList.Count == 1)
+            {
+                return BindStaticStmt(stmt.StVarList[0]);
+            }
+            else
+            {
+                return new BoundBlock(
+                    stmt.StVarList
+                        .Select(BindStaticStmt)
+                        .ToList()
+                    );
+            }
+        }
+
+        protected BoundStatement BindJumpStmt(AST.JumpStmt stmt)
+        {
+            Debug.Assert(Routine != null);
+
+            if (stmt.Type != AST.JumpStmt.Types.Return)
+            {
+                throw ExceptionUtilities.Unreachable;
+            }
+
+            BoundExpression expr = null;
+
+            if (stmt.Expression != null)
+            {
+                var isByRef = Routine.SyntaxSignature.AliasReturn;
+                expr = BindExpression(stmt.Expression, isByRef ? BoundAccess.ReadRef : BoundAccess.Read);
+
+                if (!isByRef)
+                {
+                    // copy returned value
+                    expr = BindCopyValue(expr);
+                }
+            }
+
+            //
+            return new BoundReturnStatement(expr);
+        }
+
+        protected BoundExpression BindCopyValue(BoundExpression expr)
+        {
+            if (expr.IsDeeplyCopied)
+            {
+                return new BoundCopyValue(expr).WithAccess(BoundAccess.Read);
+            }
+            else
+            {
+                // value does not have to be copied
+                return expr;
+            }
         }
 
         public BoundVariableRef BindCatchVariable(AST.CatchItem x)
         {
-            return new BoundVariableRef(new BoundVariableName(x.Variable.VarName))
-                .WithAccess(BoundAccess.Write);
+            if (x.Variable == null)
+            {
+                return null;
+            }
+            else
+            {
+                return new BoundVariableRef(new BoundVariableName(x.Variable.VarName))
+                    .WithSyntax(x.Variable)
+                    .WithAccess(BoundAccess.Write);
+            }
         }
 
-        public BoundExpression BindExpression(AST.Expression expr, BoundAccess access)
-        {
-            var bound = BindExpressionCore(expr, access).WithAccess(access);
-            bound.PhpSyntax = expr;
+        public virtual BoundItemsBag<BoundExpression> BindWholeExpression(AST.Expression expr, BoundAccess access) => BindExpression(expr, access);
 
-            return bound;
-        }
+        protected virtual BoundExpression BindExpression(AST.Expression expr, BoundAccess access) => BindExpressionCore(expr, access).WithSyntax(expr);
 
-        BoundExpression BindExpressionCore(AST.Expression expr, BoundAccess access)
+        protected BoundExpression BindExpressionCore(AST.Expression expr, BoundAccess access)
         {
             Debug.Assert(expr != null);
 
             if (expr is AST.Literal) return BindLiteral((AST.Literal)expr).WithAccess(access);
             if (expr is AST.ConstantUse) return BindConstUse((AST.ConstantUse)expr).WithAccess(access);
-            if (expr is AST.VarLikeConstructUse) return BindVarLikeConstructUse((AST.VarLikeConstructUse)expr, access);
+            if (expr is AST.VarLikeConstructUse)
+            {
+                if (((AST.VarLikeConstructUse)expr).IsNullSafeObjectOperation)
+                {
+                    Diagnostics.Add(GetLocation(expr), Errors.ErrorCode.ERR_NotYetImplemented, $"null-safe object operator");
+                }
+
+                if (expr is AST.SimpleVarUse) return BindSimpleVarUse((AST.SimpleVarUse)expr, access);
+                if (expr is AST.FunctionCall) return BindFunctionCall((AST.FunctionCall)expr).WithAccess(access);
+                if (expr is AST.NewEx) return BindNew((AST.NewEx)expr, access);
+                if (expr is AST.ArrayEx) return BindArrayEx((AST.ArrayEx)expr, access);
+                if (expr is AST.ItemUse) return BindItemUse((AST.ItemUse)expr, access);
+                if (expr is AST.StaticFieldUse) return BindFieldUse((AST.StaticFieldUse)expr, access);
+            }
             if (expr is AST.BinaryEx) return BindBinaryEx((AST.BinaryEx)expr).WithAccess(access);
             if (expr is AST.AssignEx) return BindAssignEx((AST.AssignEx)expr, access);
-            if (expr is AST.UnaryEx) return BindUnaryEx((AST.UnaryEx)expr, access);
+            if (expr is AST.UnaryEx) return BindUnaryEx((AST.UnaryEx)expr, access).WithAccess(access);
             if (expr is AST.IncDecEx) return BindIncDec((AST.IncDecEx)expr).WithAccess(access);
-            if (expr is AST.ConditionalEx) return BindConditionalEx((AST.ConditionalEx)expr).WithAccess(access);
+            if (expr is AST.ConditionalEx) return BindConditionalEx((AST.ConditionalEx)expr, access).WithAccess(access);
             if (expr is AST.ConcatEx) return BindConcatEx((AST.ConcatEx)expr).WithAccess(access);
             if (expr is AST.IncludingEx) return BindIncludeEx((AST.IncludingEx)expr).WithAccess(access);
             if (expr is AST.InstanceOfEx) return BindInstanceOfEx((AST.InstanceOfEx)expr).WithAccess(access);
             if (expr is AST.PseudoConstUse) return BindPseudoConst((AST.PseudoConstUse)expr).WithAccess(access);
             if (expr is AST.IssetEx) return BindIsSet((AST.IssetEx)expr).WithAccess(access);
             if (expr is AST.ExitEx) return BindExitEx((AST.ExitEx)expr).WithAccess(access);
+            if (expr is AST.ThrowEx throwEx) return new BoundThrowExpression(BindExpression(throwEx.Expression, BoundAccess.Read));
             if (expr is AST.EmptyEx) return BindIsEmptyEx((AST.EmptyEx)expr).WithAccess(access);
+            if (expr is AST.LambdaFunctionExpr) return BindLambda((AST.LambdaFunctionExpr)expr).WithAccess(access);
+            if (expr is AST.EvalEx) return BindEval((AST.EvalEx)expr).WithAccess(access);
+            if (expr is AST.YieldEx) return BindYieldEx((AST.YieldEx)expr, access).WithAccess(access);
+            if (expr is AST.YieldFromEx) return BindYieldFromEx((AST.YieldFromEx)expr, access).WithAccess(access);
+            if (expr is AST.ShellEx) return BindShellEx((AST.ShellEx)expr).WithAccess(access);
+            if (expr is AST.MatchEx) return BindMatchEx((AST.MatchEx)expr, access);
 
-            throw new NotImplementedException(expr.GetType().FullName);
+            //
+            Diagnostics.Add(GetLocation(expr), Errors.ErrorCode.ERR_NotYetImplemented, $"Expression of type '{expr.GetType().Name}'");
+            return new BoundLiteral(null);
         }
 
-        BoundExpression BindConstUse(AST.ConstantUse x)
+        protected virtual BoundYieldEx BindYieldEx(AST.YieldEx expr, BoundAccess access)
+        {
+            throw ExceptionUtilities.Unreachable;
+        }
+
+        protected virtual BoundExpression BindYieldFromEx(AST.YieldFromEx expr, BoundAccess access)
+        {
+            throw ExceptionUtilities.Unreachable;
+        }
+
+        protected BoundLambda BindLambda(AST.LambdaFunctionExpr expr)
+        {
+            IList<AST.FormalParam> useparams;
+
+            // arrow function gets captured variables implicitly
+            if (expr is AST.ArrowFunctionExpr fn)
+            {
+                var captured = new HashSet<VariableName>();
+
+                foreach (var v in fn.Expression.SelectLocalVariables())
+                {
+                    captured.Add(v.VarName);
+                }
+
+                foreach (var p in fn.Signature.FormalParams)
+                {
+                    captured.Remove(p.Name.Name);
+                }
+
+                useparams = captured
+                    .Select(vname => new AST.FormalParam(Span.Invalid, vname.Value, Span.Invalid, null, AST.FormalParam.Flags.Default, null))
+                    .ToList();
+            }
+            else
+            {
+                useparams = expr.UseParams ?? Array.Empty<AST.FormalParam>();
+            }
+
+            // Syntax is bound by caller, needed to resolve lambda symbol in analysis
+            return new BoundLambda(BindLambdaUseArguments(useparams));
+        }
+
+        protected BoundExpression BindEval(AST.EvalEx expr)
+        {
+            Routine.Flags |= RoutineFlags.HasEval;
+
+            return new BoundEvalEx(BindExpression(expr.Code));
+        }
+
+        protected BoundExpression BindConstUse(AST.ConstantUse x)
         {
             if (x is AST.GlobalConstUse)
             {
@@ -158,13 +611,12 @@ namespace Pchp.CodeAnalysis.Semantics
             if (x is AST.ClassConstUse)
             {
                 var cx = (AST.ClassConstUse)x;
-                var dtype = cx.TargetType as AST.INamedTypeRef;
-                if (dtype != null && cx.Name.Equals("class"))   // Type::class ~ "Type"
-                {
-                    return new BoundLiteral(dtype.ClassName.ToString());
-                }
+                var typeref = BindTypeRef(cx.TargetType, objectTypeInfoSemantic: true);
 
-                var typeref = BindTypeRef(cx.TargetType);
+                if (cx.Name.Equals("class"))   // pseudo class constant
+                {
+                    return new BoundPseudoClassConst(typeref, AST.PseudoClassConstUse.Types.Class);
+                }
 
                 return BoundFieldRef.CreateClassConst(typeref, new BoundVariableName(cx.Name));
             }
@@ -172,185 +624,474 @@ namespace Pchp.CodeAnalysis.Semantics
             throw ExceptionUtilities.UnexpectedValue(x);
         }
 
-        BoundExpression BindExitEx(AST.ExitEx x)
+        protected BoundExpression BindExitEx(AST.ExitEx x)
         {
             return (x.ResulExpr != null)
                 ? new BoundExitEx(BindExpression(x.ResulExpr))
                 : new BoundExitEx();
         }
 
-        BoundExpression BindIsEmptyEx(AST.EmptyEx x)
+        protected BoundExpression BindIsEmptyEx(AST.EmptyEx x)
         {
-            return new BoundIsEmptyEx((BoundReferenceExpression)BindExpression(x.Expression, BoundAccess.Read.WithQuiet()));
+            return new BoundIsEmptyEx(BindExpression(x.Expression, BoundAccess.Read.WithQuiet()));
         }
 
-        BoundExpression BindIsSet(AST.IssetEx x)
+        protected BoundExpression BindIsSet(AST.IssetEx x)
         {
-            return new BoundIsSetEx(x.VarList.Select(v => (BoundReferenceExpression)BindExpression(v, BoundAccess.Read.WithQuiet())).ToImmutableArray());
+            var varlist = x.VarList;
+
+            BoundExpression result = null;
+
+            for (int i = varlist.Count - 1; i >= 0; i--)
+            {
+                BoundExpression issetExpr;
+
+                if (varlist[i] is AST.ItemUse itemuse)
+                {
+                    issetExpr = new BoundOffsetExists(
+                        receiver: BindExpression(itemuse.Array, BoundAccess.Read.WithQuiet()),
+                        index: BindExpression(itemuse.Index));
+                }
+                else
+                {
+                    issetExpr = new BoundIsSetEx((BoundReferenceExpression)BindExpression(varlist[i], BoundAccess.Isset));
+                }
+
+                //
+
+                if (result == null)
+                {
+                    result = issetExpr;
+                }
+                else
+                {
+                    // isset(i1) && ... && isset(iN)
+                    result = new BoundBinaryEx(issetExpr, result, AST.Operations.And).WithAccess(BoundAccess.Read);
+                }
+            }
+
+            //
+            return result ?? throw new ArgumentException("isset() without arguments!");
         }
 
-        BoundExpression BindPseudoConst(AST.PseudoConstUse x) => new BoundPseudoConst(x.Type);
+        protected BoundExpression BindPseudoConst(AST.PseudoConstUse x) => new BoundPseudoConst(x.Type);
 
-        BoundExpression BindInstanceOfEx(AST.InstanceOfEx x)
+        protected BoundExpression BindInstanceOfEx(AST.InstanceOfEx x)
         {
-            return new BoundInstanceOfEx(BindExpression(x.Expression, BoundAccess.Read), BindTypeRef(x.ClassNameRef));
+            return new BoundInstanceOfEx(BindExpression(x.Expression, BoundAccess.Read), BindTypeRef(x.ClassNameRef, objectTypeInfoSemantic: true));
         }
 
-        BoundExpression BindIncludeEx(AST.IncludingEx x)
+        protected BoundExpression BindIncludeEx(AST.IncludingEx x)
         {
+            Routine.Flags |= RoutineFlags.HasInclude;
+
             return new BoundIncludeEx(BindExpression(x.Target, BoundAccess.Read), x.InclusionType);
         }
 
-        BoundExpression BindConcatEx(AST.ConcatEx x)
-        {
-            return new BoundConcatEx(BindArguments(x.Expressions));
-        }
+        protected BoundExpression BindConcatEx(AST.ConcatEx x) => BindConcatEx(x.Expressions);
 
-        BoundRoutineCall BindFunctionCall(AST.FunctionCall x, BoundAccess access)
+        protected BoundExpression BindConcatEx(AST.Expression[] args)
         {
-            if (!access.IsRead && !access.IsNone)
+            // Flatten and bind concat arguments using a stack (its bottom is the last argument)
+            var boundArgs = new List<BoundArgument>();
+            var exprStack = new Stack<AST.Expression>();
+
+            args.Reverse().ForEach(exprStack.Push);
+
+            while (exprStack.Count > 0)
             {
-                throw new NotSupportedException();
+                var arg = exprStack.Pop();
+                if (arg is AST.ConcatEx concat)
+                {
+                    concat.Expressions.Reverse().ForEach(exprStack.Push);
+                }
+                else if (arg is AST.BinaryEx binEx && binEx.Operation == AST.Operations.Concat)
+                {
+                    exprStack.Push(binEx.RightExpr);
+                    exprStack.Push(binEx.LeftExpr);
+                }
+                else
+                {
+                    boundArgs.Add(BindArgument(arg));
+                }
             }
 
-            var boundinstance = (x.IsMemberOf != null) ? BindExpression(x.IsMemberOf, BoundAccess.Read/*Object?*/) : null;
-            var boundargs = BindArguments(x.CallSignature.Parameters);
+            return BindConcatEx(boundArgs);
+        }
+
+        protected BoundExpression BindConcatEx(List<BoundArgument> boundargs)
+        {
+            // flattern concat arguments
+            for (int i = 0; i < boundargs.Count; i++)
+            {
+                if (boundargs[i].Value is BoundConcatEx c)
+                {
+                    var subargs = c.ArgumentsInSourceOrder;
+                    boundargs.RemoveAt(i);
+                    boundargs.InsertRange(i, subargs);
+                }
+            }
+
+            //
+            return new BoundConcatEx(boundargs.AsImmutable());
+        }
+
+        /// <summary>
+        /// Optimization:
+        /// Binds chain of <see cref="AST.VarLikeConstructUse.IsMemberOf"/> expressions using own stack
+        /// in order to avoid <see cref="StackOverflowException"/> for really long expression chains.
+        /// </summary>
+        BoundExpression BindIsMemberOfChain(AST.Expression expr, BoundAccess access)
+        {
+            Debug.Assert(access.IsRead);
+
+            if (expr is AST.FunctionCall varlike && varlike.IsMemberOf != null) // stack only needed if there are more expressions in the chain
+            {
+                // push chain onto the stack
+                var stack = new Stack<AST.FunctionCall>(4);
+                var tail = varlike.IsMemberOf;
+
+                for (var x = varlike; x != null; x = tail as AST.FunctionCall)
+                {
+                    stack.Push(x);
+                    tail = x.IsMemberOf;
+                }
+
+                // bind entries on the stack
+                var bound = tail != null ? BindExpression(tail, access) : null;
+                while (stack.Count != 0)
+                {
+                    var fnc = stack.Pop();
+                    bound = BindFunctionCall(fnc, bound).WithAccess(access).WithSyntax(fnc);
+                }
+
+                Debug.Assert(bound != null);
+
+                //
+                return bound;
+            }
+
+            // optimization: no stack needed, just bind
+            return expr != null ? BindExpression(expr, access) : null;
+        }
+
+        protected BoundExpression BindFunctionCall(AST.FunctionCall x, BoundExpression boundTarget = null)
+        {
+            if (Routine != null)
+            {
+                // TODO: ignore well-known library functions
+                Routine.Flags |= RoutineFlags.HasUserFunctionCall;
+            }
+
+            //
+            if (boundTarget == null)
+            {
+                boundTarget = BindIsMemberOfChain(x.IsMemberOf, BoundAccess.Read/*Object?*/);
+            }
+
+            BoundRoutineCall result;
 
             if (x is AST.DirectFcnCall)
             {
-                var f = (AST.DirectFcnCall)x;
-                var fname = f.FullName;
+                // func(...)
+                // $x->func(...)
 
-                if (f.IsMemberOf == null)
+                var fname = ((AST.DirectFcnCall)x).FullName;
+
+                if (boundTarget == null)
                 {
-                    return new BoundGlobalFunctionCall(fname.Name, fname.FallbackName, boundargs)
-                        .WithAccess(access);
+                    if (fname.IsGetArgsOrArgsNumFunctionName() && Routine != null)
+                    {
+                        // remember we need varargs:
+                        Routine.Flags |= RoutineFlags.UsesArgs;
+
+                        // cannot use in global scope
+                        if (Routine.IsGlobalScope)
+                        {
+                            Diagnostics.Add(GetLocation(x), Errors.ErrorCode.WRN_CalledFromGlobalScope);
+                        }
+                    }
+
+                    if (fname.IsAssertFunctionName())
+                    {
+                        // Template: assert(...)
+                        return BindAssertExpression(BindArguments(x.CallSignature.Parameters));
+                    }
+                    else
+                    {
+                        result = new BoundGlobalFunctionCall(fname.Name, fname.FallbackName, BindArguments(x.CallSignature.Parameters));
+                    }
                 }
                 else
                 {
                     Debug.Assert(fname.FallbackName.HasValue == false);
                     Debug.Assert(fname.Name.QualifiedName.IsSimpleName);
-                    return new BoundInstanceFunctionCall(boundinstance, fname.Name, boundargs)
-                        .WithAccess(access);
+                    result = new BoundInstanceFunctionCall(boundTarget, fname.Name, BindArguments(x.CallSignature.Parameters));
                 }
             }
             else if (x is AST.IndirectFcnCall)
             {
-                var f = (AST.IndirectFcnCall)x;
-                var nameExpr = BindExpression(f.NameExpr);
-                return ((f.IsMemberOf == null)
-                    ? (BoundRoutineCall)new BoundGlobalFunctionCall(nameExpr, boundargs)
-                    : new BoundInstanceFunctionCall(boundinstance, new BoundUnaryEx(nameExpr, AST.Operations.StringCast), boundargs))
-                        .WithAccess(access);
+                // $func(...)
+                // $x->$func(...)
+
+                var nameExpr = BindExpression(((AST.IndirectFcnCall)x).NameExpr);
+                if (boundTarget == null)
+                {
+                    result = new BoundGlobalFunctionCall(nameExpr, BindArguments(x.CallSignature.Parameters));
+                }
+                else
+                {
+                    result = new BoundInstanceFunctionCall(boundTarget, new BoundConversionEx(nameExpr, BoundTypeRefFactory.StringTypeRef), BindArguments(x.CallSignature.Parameters));
+                }
             }
-            else if (x is AST.StaticMtdCall)
+            else if (x is AST.StaticMtdCall staticMtdCall)
             {
-                var f = (AST.StaticMtdCall)x;
-                Debug.Assert(f.IsMemberOf == null);
+                // X::foo(...)
 
-                var boundname = (f is AST.DirectStMtdCall)
-                    ? new BoundRoutineName(new QualifiedName(((AST.DirectStMtdCall)f).MethodName))
-                    : new BoundRoutineName(new BoundUnaryEx(BindExpression(((AST.IndirectStMtdCall)f).MethodNameVar), AST.Operations.StringCast));
+                Debug.Assert(boundTarget == null);
 
-                return new BoundStaticFunctionCall(BindTypeRef(f.TargetType), boundname, boundargs)
-                    .WithAccess(access);
+                var boundname = (staticMtdCall is AST.DirectStMtdCall dm)
+                    ? new BoundRoutineName(new QualifiedName(dm.MethodName))
+                    : new BoundRoutineName(new BoundConversionEx(BindExpression(((AST.IndirectStMtdCall)staticMtdCall).MethodNameExpression), BoundTypeRefFactory.StringTypeRef));
+
+                result = new BoundStaticFunctionCall(BindTypeRef(staticMtdCall.TargetType, objectTypeInfoSemantic: true), boundname, BindArguments(x.CallSignature.Parameters));
+            }
+            else
+            {
+                //
+                throw new NotImplementedException(x.GetType().FullName);
+            }
+
+            var genericparams = x.GetGenericParams();
+            if (genericparams.Count != 0)
+            {
+                // bind type arguments (CLR)
+                result.TypeArguments = genericparams.SelectAsArray(t => BindTypeRef(t, false));
             }
 
             //
-            throw new NotImplementedException(x.GetType().FullName);
+            return result;
         }
 
-        public BoundTypeRef BindTypeRef(AST.TypeRef tref)
+        BoundExpression BindAssertExpression(ImmutableArray<BoundArgument> boundArguments)
         {
-            var bound = new BoundTypeRef(tref);
+            return EnableAssertExpression
+                ? (BoundExpression)new BoundAssertEx(boundArguments)
+                : (BoundExpression)new BoundLiteral(true.AsObject());
+        }
 
-            if (tref is AST.IndirectTypeRef)
+        public IBoundTypeRef BindTypeRef(AST.TypeRef tref, bool objectTypeInfoSemantic = false)
+        {
+            var type = BoundTypeRefFactory.CreateFromTypeRef(tref, this, this.Self, objectTypeInfoSemantic).WithSyntax(tref);
+
+            // update flags
+            if (type is BoundReservedTypeRef rt && rt.ReservedType == AST.ReservedTypeRef.ReservedType.@static && Routine != null)
             {
-                bound.TypeExpression = BindExpression(((AST.IndirectTypeRef)tref).ClassNameVar);
+                Routine.Flags |= RoutineFlags.UsesLateStatic;
             }
 
-            return bound;
+            //
+            return type;
         }
 
-        BoundExpression BindConditionalEx(AST.ConditionalEx expr)
+        protected BoundExpression BindMatchEx(AST.MatchEx expr, BoundAccess access)
         {
-            return new BoundConditionalEx(
-                BindExpression(expr.CondExpr),
-                (expr.TrueExpr != null) ? BindExpression(expr.TrueExpr) : null,
-                BindExpression(expr.FalseExpr));
+            Debug.Assert(access.IsRead || access.IsNone);
+            //if (!access.IsRead || access.IsReadRef && !access.IsNone)
+            //{
+            //    // TODO: Diagnostics.Add(GetLocation(expr), "match can only be read");
+            //}
+
+            // Template: match (A) { B => C, D => E, }
+            // ($tmp = A) === B ? C : $tmp === D ? E : throw new UnhandledMatchError
+
+            AST.Expression BindArm(AST.Expression value, AST.MatchArm[] arms)
+            {
+                AST.Expression BindArm(AST.Expression value, AST.MatchArm arm, AST.Expression falseExpr)
+                {
+                    // value === arm.Condition ? arm.Expression : falseExpr
+
+                    AST.Expression condition = null;
+
+                    for (int i = 0; i < arm.ConditionList.Length; i++)
+                    {
+                        // value === condition[i]
+                        var cond = new AST.BinaryEx(arm.ConditionList[i].Span, AST.Operations.Identical, value, arm.ConditionList[i]) { ContainingElement = arm };
+
+                        condition = condition == null
+                            ? cond
+                            : new AST.BinaryEx(Span.Invalid, AST.Operations.Or, condition, cond) { ContainingElement = arm };
+                    }
+
+                    if (condition == null)
+                    {
+                        return arm.Expression;
+                    }
+                    else
+                    {
+                        return new AST.ConditionalEx(condition, arm.Expression, falseExpr) { ContainingElement = arm };
+                    }
+                }
+
+                var tmpname = NextMatchVariableName();
+
+                // Template: $tmp = A
+                var tmpvar = new AST.DirectVarUse(value.Span, tmpname) { ContainingElement = value };
+                var assignment = new AST.ValueAssignEx(value.Span, AST.Operations.AssignValue, tmpvar, value) { ContainingElement = value };
+
+                // Template: throw new UnhandledMatchError                 
+                AST.Expression result = new AST.ThrowEx(value.Span,
+                    new AST.NewEx(value.Span,
+                        new AST.ClassTypeRef(Span.Invalid, NameUtils.SpecialNames.UnhandledMatchError),
+                        Array.Empty<AST.ActualParam>(), Span.Invalid));
+
+                for (int i = arms.Length - 1; i >= 0; i--)
+                {
+                    result = BindArm(i == 0 ? (AST.Expression)assignment : tmpvar, arms[i], result);
+                }
+
+                return result;
+            }
+
+            //
+            return BindExpression(BindArm(expr.MatchValue, expr.MatchItems), access);
         }
 
-        BoundExpression BindIncDec(AST.IncDecEx expr)
+        protected virtual BoundExpression BindConditionalEx(AST.ConditionalEx expr, BoundAccess access)
+        {
+            Debug.Assert(access.IsRead || access.IsNone);
+
+            // ternary operator C ? T : F
+            // T can be omitted
+
+            return (expr.TrueExpr == null)
+                ? new BoundConditionalEx(BindExpression(expr.CondExpr, access.WithRead()), null, BindExpression(expr.FalseExpr, access))
+                : new BoundConditionalEx(BindExpression(expr.CondExpr), BindExpression(expr.TrueExpr, access), BindExpression(expr.FalseExpr, access));
+        }
+
+        protected BoundExpression BindIncDec(AST.IncDecEx expr)
         {
             // bind variable reference
             var varref = (BoundReferenceExpression)BindExpression(expr.Variable, BoundAccess.ReadAndWrite);
 
-            // resolve kind
-            UnaryOperationKind kind;
-            if (expr.Inc)
-                kind = (expr.Post) ? UnaryOperationKind.OperatorPostfixIncrement : UnaryOperationKind.OperatorPrefixIncrement;
-            else
-                kind = (expr.Post) ? UnaryOperationKind.OperatorPostfixDecrement : UnaryOperationKind.OperatorPrefixDecrement;
-
             //
-            return new BoundIncDecEx(varref, kind);
+            return new BoundIncDecEx(varref, expr.Inc, expr.Post);
         }
 
-        BoundExpression BindVarLikeConstructUse(AST.VarLikeConstructUse expr, BoundAccess access)
+        protected BoundExpression BindShellEx(AST.ShellEx expr)
         {
-            if (expr is AST.SimpleVarUse) return BindSimpleVarUse((AST.SimpleVarUse)expr, access);
-            if (expr is AST.FunctionCall) return BindFunctionCall((AST.FunctionCall)expr, access);
-            if (expr is AST.NewEx) return BindNew((AST.NewEx)expr, access);
-            if (expr is AST.ArrayEx) return BindArrayEx((AST.ArrayEx)expr, access);
-            if (expr is AST.ItemUse) return BindItemUse((AST.ItemUse)expr, access);
-            if (expr is AST.StaticFieldUse) return BindFieldUse((AST.StaticFieldUse)expr, access);
-            if (expr is AST.ListEx) return BindListEx((AST.ListEx)expr).WithAccess(access);
-
-
-            throw new NotImplementedException(expr.GetType().FullName);
+            return new BoundGlobalFunctionCall(NameUtils.SpecialNames.shell_exec, null, BindArguments(expr.Command));
         }
 
-        BoundExpression BindNew(AST.NewEx x, BoundAccess access)
+        protected BoundExpression BindNew(AST.NewEx x, BoundAccess access)
         {
             Debug.Assert(access.IsRead || access.IsReadRef || access.IsNone);
 
-            return new BoundNewEx(BindTypeRef(x.ClassNameRef), BindArguments(x.CallSignature.Parameters))
+            return new BoundNewEx(BindTypeRef(x.ClassNameRef, objectTypeInfoSemantic: true), BindArguments(x.CallSignature.Parameters))
                 .WithAccess(access);
         }
 
-        BoundExpression BindArrayEx(AST.ArrayEx x, BoundAccess access)
+        protected BoundExpression BindArrayEx(AST.ArrayEx x, BoundAccess access)
         {
-            Debug.Assert(access.IsRead && !access.IsReadRef);
-
-            return new BoundArrayEx(BindArrayItems(x.Items)) { PhpSyntax = x }.WithAccess(access);
-        }
-
-        IEnumerable<KeyValuePair<BoundExpression, BoundExpression>> BindArrayItems(AST.Item[] items)
-        {
-            foreach (var x in items)
+            if (x.Operation == AST.Operations.Array)
             {
-                var boundIndex = (x.Index != null) ? BindExpression(x.Index, BoundAccess.Read) : null;
-                var boundValue = (x is AST.RefItem)
-                    ? BindExpression(((AST.RefItem)x).RefToGet, BoundAccess.ReadRef)
-                    : BindExpression(((AST.ValueItem)x).ValueExpr, BoundAccess.Read);
+                Debug.Assert(access.IsRead || access.IsNone);
 
-                yield return new KeyValuePair<BoundExpression, BoundExpression>(boundIndex, boundValue);
+                if (access.IsReadRef)
+                {
+                    // TODO: warning deprecated
+                    // _diagnostics. ...
+                }
+
+                return new BoundArrayEx(BindArrayItems(x.Items))
+                    .WithAccess(access);
+            }
+            else if (x.Operation == AST.Operations.List)
+            {
+                Debug.Assert(access.IsWrite);
+
+                return new BoundListEx(BindArrayItems(x.Items, islist: true))
+                    .WithAccess(BoundAccess.Write);
+            }
+            else
+            {
+                throw ExceptionUtilities.UnexpectedValue(x.Operation);
             }
         }
 
-        BoundExpression BindItemUse(AST.ItemUse x, BoundAccess access)
+        protected ImmutableArray<KeyValuePair<BoundExpression, BoundExpression>> BindArrayItems(AST.Item[] items, bool islist = false)
         {
-            if (x.IsMemberOf != null)
+            // trim trailing empty items
+            int count = items.Length;
+            while (count > 0 && items[count - 1] == null)
             {
-                Debug.Assert(x.Array.IsMemberOf == null);
-                // fix this phalanger ast weirdness:
-                x.Array.IsMemberOf = x.IsMemberOf;
-                x.IsMemberOf = null;
+                count--;
             }
+
+            if (count == 0)
+            {
+                return ImmutableArray<KeyValuePair<BoundExpression, BoundExpression>>.Empty;
+            }
+
+            var builder = ImmutableArray.CreateBuilder<KeyValuePair<BoundExpression, BoundExpression>>(count);
+
+            for (int i = 0; i < count; i++)
+            {
+                var x = items[i];
+                if (x == null)
+                {
+                    // list() may contain empty items
+                    Debug.Assert(islist);
+                    builder.Add(default);
+                }
+                else
+                {
+                    if (x is AST.SpreadItem)
+                    {
+                        throw new NotImplementedException("'...' spread array operator");
+                    }
+
+                    Debug.Assert(x is AST.RefItem || x is AST.ValueItem);
+
+                    var boundIndex = (x.Index != null) ? BindExpression(x.Index, BoundAccess.Read) : null;
+                    BoundExpression boundValue;
+
+                    var value = (AST.Expression)((AST.IArrayItem)x).Value;
+
+                    if (islist)
+                    {
+                        // write access
+                        boundValue = BindExpression(value, x.IsByRef ? BoundAccess.Write.WithWriteRef(0) : BoundAccess.Write);
+                    }
+                    else
+                    {
+                        // read access
+                        boundValue = BindExpression(value, x.IsByRef ? BoundAccess.ReadRef : BoundAccess.Read);
+
+                        if (!x.IsByRef)
+                        {
+                            boundValue = BindCopyValue(boundValue);
+                        }
+                    }
+
+                    builder.Add(new KeyValuePair<BoundExpression, BoundExpression>(boundIndex, boundValue));
+                }
+            }
+
+            //
+            return builder.MoveToImmutable();
+        }
+
+        protected BoundExpression BindItemUse(AST.ItemUse x, BoundAccess access)
+        {
+            AstUtils.PatchItemUse(x);
 
             var arrayAccess = BoundAccess.Read;
 
-            if (access.IsWrite || access.EnsureObject || access.EnsureArray)
+            if (x.Index == null && (!access.IsEnsure && !access.IsWrite))   // READ variable[]
+                access = access.WithReadRef();                              // -> READREF variable[] // the only way new item will be ensured
+
+            if (access.IsWrite || access.IsEnsure)
                 arrayAccess = arrayAccess.WithEnsureArray();
             if (access.IsQuiet)
                 arrayAccess = arrayAccess.WithQuiet();
@@ -360,24 +1101,73 @@ namespace Pchp.CodeAnalysis.Semantics
             // boundArray.Access = boundArray.Access.WithRead(typeof(PhpArray))
 
             return new BoundArrayItemEx(
+                DeclaringCompilation,
                 boundArray, (x.Index != null) ? BindExpression(x.Index, BoundAccess.Read) : null)
                 .WithAccess(access);
         }
 
-        BoundExpression BindSimpleVarUse(AST.SimpleVarUse expr, BoundAccess access)
+        protected BoundVariableName BindVariableName(AST.SimpleVarUse varuse)
         {
-            var dexpr = expr as AST.DirectVarUse;
-            var iexpr = expr as AST.IndirectVarUse;
+            var dexpr = varuse as AST.DirectVarUse;
+            var iexpr = varuse as AST.IndirectVarUse;
 
             Debug.Assert(dexpr != null || iexpr != null);
 
-            var varname = (dexpr != null)
+            return (dexpr != null)
                 ? new BoundVariableName(dexpr.VarName)
                 : new BoundVariableName(BindExpression(iexpr.VarNameEx));
+        }
+
+        protected BoundExpression BindSimpleVarUse(AST.SimpleVarUse expr, BoundAccess access)
+        {
+            var varname = BindVariableName(expr);
 
             if (expr.IsMemberOf == null)
             {
-                return new BoundVariableRef(varname);
+                if (Routine == null)
+                {
+                    // cannot use variables in field initializer or parameter initializer
+                    Diagnostics.Add(GetLocation(expr), Errors.ErrorCode.ERR_InvalidConstantExpression);
+                }
+
+                if (varname.IsDirect)
+                {
+                    if (varname.NameValue.IsThisVariableName)
+                    {
+                        // $this is read-only
+                        if (access.EnsureObject || access.EnsureArray)
+                        {
+                            access = BoundAccess.Read;
+                        }
+
+                        if (access.IsWrite || access.IsUnset)
+                        {
+                            Diagnostics.Add(GetLocation(expr), Errors.ErrorCode.ERR_CannotAssignToThis);
+                        }
+
+                        // $this is only valid in global code and instance methods:
+                        if (Routine != null && Routine.IsStatic && !Routine.IsGlobalScope && !(Routine is SourceLambdaSymbol lambda && lambda.UseThis))
+                        {
+                            // WARN:
+                            Diagnostics.Add(DiagnosticBagExtensions.ParserDiagnostic(ContainingFile, expr.Span, Devsense.PHP.Errors.Warnings.ThisOutOfMethod));
+                            // ERR: // NOTE: causes a lot of project to not compile // CONSIDER: uncomment
+                            // Diagnostics.Add(GetLocation(expr), Errors.ErrorCode.ERR_ThisOutOfObjectContext);
+                        }
+                    }
+                    else if (varname.NameValue.Value.StartsWith("<match>'"))
+                    {
+                        return new BoundTemporalVariableRef(varname.NameValue).WithAccess(access);
+                    }
+                }
+                else
+                {
+                    if (Routine != null)
+                    {
+                        Routine.Flags |= RoutineFlags.HasIndirectVar;
+                    }
+                }
+
+                return new BoundVariableRef(varname).WithAccess(access);
             }
             else
             {
@@ -393,9 +1183,9 @@ namespace Pchp.CodeAnalysis.Semantics
             }
         }
 
-        BoundExpression BindFieldUse(AST.StaticFieldUse x, BoundAccess access)
+        protected BoundExpression BindFieldUse(AST.StaticFieldUse x, BoundAccess access)
         {
-            var typeref = BindTypeRef(x.TargetType);
+            var typeref = BindTypeRef(x.TargetType, objectTypeInfoSemantic: true);
             BoundVariableName varname;
 
             if (x is AST.DirectStFldUse)
@@ -415,10 +1205,10 @@ namespace Pchp.CodeAnalysis.Semantics
                 throw ExceptionUtilities.UnexpectedValue(x);
             }
 
-            return BoundFieldRef.CreateStaticField(typeref, varname);
+            return BoundFieldRef.CreateStaticField(typeref, varname).WithAccess(access);
         }
 
-        BoundExpression BindGlobalConstUse(AST.GlobalConstUse expr)
+        protected BoundExpression BindGlobalConstUse(AST.GlobalConstUse expr)
         {
             // translate built-in constants directly
             if (expr.Name == QualifiedName.True) return new BoundLiteral(true);
@@ -426,58 +1216,132 @@ namespace Pchp.CodeAnalysis.Semantics
             if (expr.Name == QualifiedName.Null) return new BoundLiteral(null);
 
             // bind constant
-            return new BoundGlobalConst(expr.Name.ToString());
+            return new BoundGlobalConst(expr.FullName.Name, expr.FullName.FallbackName);
         }
 
-        BoundExpression BindBinaryEx(AST.BinaryEx expr)
+        public BoundStatement BindGlobalConstantDecl(AST.GlobalConstantDecl decl)
         {
-            if (expr.Operation == AST.Operations.Concat)
+            var qname = NameUtils.MakeQualifiedName(new Name(decl.Name.Name.Value), decl.ContainingNamespace);
+            return new BoundGlobalConstDeclStatement(qname, BindExpression(decl.Initializer, BoundAccess.Read));
+        }
+
+        protected virtual BoundExpression BindBinaryEx(AST.BinaryEx expr)
+        {
+            BoundAccess laccess = BoundAccess.Read;
+
+            switch (expr.Operation)
             {
-                return new BoundConcatEx(BindArguments(new[] { expr.LeftExpr, expr.RightExpr }));
-            }
-            else
-            {
-                return new BoundBinaryEx(
-                    BindExpression(expr.LeftExpr, BoundAccess.Read),
-                    BindExpression(expr.RightExpr, BoundAccess.Read),
-                    expr.Operation);
+                case AST.Operations.Concat:     // Left . Right
+                    return BindConcatEx(new[] { expr.LeftExpr, expr.RightExpr });
+
+                case AST.Operations.Coalesce:
+                    laccess = BoundAccess.Read.WithQuiet(); // Template: A ?? B; // read A quietly
+                    goto default;
+
+                default:
+                    return new BoundBinaryEx(
+                        BindExpression(expr.LeftExpr, laccess),
+                        BindExpression(expr.RightExpr, BoundAccess.Read),
+                        expr.Operation);
             }
         }
 
-        BoundExpression BindUnaryEx(AST.UnaryEx expr, BoundAccess access)
+        protected BoundExpression BindUnaryEx(AST.UnaryEx expr, BoundAccess access)
         {
             var operandAccess = BoundAccess.Read;
 
             switch (expr.Operation)
             {
                 case AST.Operations.AtSign:
-                    operandAccess = access;
+                    operandAccess = access; // TODO: | Quiet
                     break;
                 case AST.Operations.UnsetCast:
                     operandAccess = BoundAccess.None;
                     break;
             }
 
-            return new BoundUnaryEx(BindExpression(expr.Expr, operandAccess), expr.Operation)
-                .WithAccess(access);
+            var boundOperation = BindExpression(expr.Expr, operandAccess);
+
+            switch (expr.Operation)
+            {
+                case AST.Operations.BoolCast:
+                    return new BoundConversionEx(boundOperation, BoundTypeRefFactory.BoolTypeRef);
+
+                case AST.Operations.Int8Cast:
+                case AST.Operations.Int16Cast:
+                case AST.Operations.Int32Cast:
+                case AST.Operations.UInt8Cast:
+                case AST.Operations.UInt16Cast:
+                // -->
+                case AST.Operations.UInt64Cast:
+                case AST.Operations.UInt32Cast:
+                case AST.Operations.Int64Cast:
+                    return new BoundConversionEx(boundOperation, BoundTypeRefFactory.LongTypeRef);
+
+                case AST.Operations.DecimalCast:
+                case AST.Operations.DoubleCast:
+                case AST.Operations.FloatCast:
+                    return new BoundConversionEx(boundOperation, BoundTypeRefFactory.DoubleTypeRef);
+
+                case AST.Operations.UnicodeCast:
+                    return new BoundConversionEx(boundOperation, BoundTypeRefFactory.StringTypeRef);
+
+                case AST.Operations.StringCast:
+
+                    // workaround (binary) is parsed as (StringCast)
+                    if (expr.ContainingSourceUnit.GetSourceCode(expr.Span).StartsWith("(binary)"))
+                    {
+                        goto case AST.Operations.BinaryCast;
+                    }
+
+                    return new BoundConversionEx(boundOperation, BoundTypeRefFactory.StringTypeRef); // TODO // CONSIDER: should be WritableString and analysis should rewrite it to String if possible
+
+                case AST.Operations.BinaryCast:
+                    // (PhpString)(byte[])expression
+                    return new BoundConversionEx(
+                        new BoundConversionEx(
+                            boundOperation,
+                            BoundTypeRefFactory.Create(DeclaringCompilation.CreateArrayTypeSymbol(DeclaringCompilation.GetSpecialType(SpecialType.System_Byte)))
+                        ).WithAccess(BoundAccess.Read),
+                        BoundTypeRefFactory.WritableStringRef);
+
+                case AST.Operations.ArrayCast:
+                    return new BoundConversionEx(boundOperation, BoundTypeRefFactory.ArrayTypeRef);
+
+                case AST.Operations.ObjectCast:
+                    return new BoundConversionEx(boundOperation, BoundTypeRefFactory.ObjectTypeRef);
+
+                default:
+                    return new BoundUnaryEx(BindExpression(expr.Expr, operandAccess), expr.Operation);
+            }
         }
 
-        BoundExpression BindAssignEx(AST.AssignEx expr, BoundAccess access)
+        protected BoundExpression BindAssignEx(AST.AssignEx expr, BoundAccess access)
         {
             var target = (BoundReferenceExpression)BindExpression(expr.LValue, BoundAccess.Write);
             BoundExpression value;
 
             // bind value (read as value or as ref)
-            if (expr is AST.ValueAssignEx)
+            if (expr is AST.ValueAssignEx assignEx)
             {
-                value = BindExpression(((AST.ValueAssignEx)expr).RValue, BoundAccess.Read);
+                value = BindExpression(assignEx.RValue, BoundAccess.Read);
+
+                // we don't need copy of RValue if assigning to list() or in a part of compound operation
+                if (expr.Operation == AST.Operations.AssignValue && !(target is BoundListEx))
+                {
+                    value = BindCopyValue(value);
+                }
+            }
+            else if (expr is AST.RefAssignEx refAssignEx)
+            {
+                Debug.Assert(expr.Operation == AST.Operations.AssignRef);
+                target.Access = target.Access.WithWriteRef(0); // note: analysis will write the write type
+                value = BindExpression(refAssignEx.RValue, BoundAccess.ReadRef);
             }
             else
             {
-                Debug.Assert(expr is AST.RefAssignEx);
-                Debug.Assert(expr.Operation == AST.Operations.AssignRef);
-                target.Access = target.Access.WithWriteRef(0); // note: analysis will write the write type
-                value = BindExpression(((AST.RefAssignEx)expr).RValue, BoundAccess.ReadRef);
+                ExceptionUtilities.UnexpectedValue(expr);
+                return null;
             }
 
             //
@@ -487,60 +1351,531 @@ namespace Pchp.CodeAnalysis.Semantics
             }
             else
             {
-                target.Access = target.Access.WithRead();   // Read & Write on target
+                if (target is BoundArrayItemEx itemex && itemex.Index == null)
+                {
+                    // Special case:
+                    switch (expr.Operation)
+                    {
+                        // "ARRAY[] .= VALUE" => "ARRAY[] = (string)VALUE"
+                        case AST.Operations.AssignPrepend:
+                        case AST.Operations.AssignAppend:   // .=
+                            value = BindConcatEx(new List<BoundArgument>() { BoundArgument.Create(new BoundLiteral(null).WithAccess(BoundAccess.Read)), BoundArgument.Create(value) });
+                            break;
 
-                return new BoundCompoundAssignEx(target, value, expr.Operation);
+                        default:
+                            value = new BoundBinaryEx(new BoundLiteral(null).WithAccess(BoundAccess.Read), value, AstUtils.CompoundOpToBinaryOp(expr.Operation));
+                            break;
+                    }
+
+                    return new BoundAssignEx(target, value.WithAccess(BoundAccess.Read)).WithAccess(access);
+                }
+                else
+                {
+                    target.Access = target.Access.WithRead();   // Read & Write on target
+
+                    return new BoundCompoundAssignEx(target, value, expr.Operation).WithAccess(access);
+                }
             }
         }
 
-        BoundExpression BindListEx(AST.ListEx expr)
+        public BoundStatement BindEmptyStmt(Span span)
         {
-            var vars = expr.Items
-                .Select(lval => (lval != null) ? (BoundReferenceExpression)BindExpression(((AST.ValueItem)lval).ValueExpr, BoundAccess.Write) : null)
-                .ToArray();
-
-            return new BoundListEx(vars).WithAccess(BoundAccess.Write);
+            return new BoundEmptyStatement(span.ToTextSpan());
         }
 
-        static BoundExpression BindLiteral(AST.Literal expr)
+        protected static BoundExpression BindLiteral(AST.Literal expr)
         {
-            if (expr is AST.LongIntLiteral) return new BoundLiteral(((AST.LongIntLiteral)expr).Value);
-            if (expr is AST.StringLiteral) return new BoundLiteral(((AST.StringLiteral)expr).Value);
-            if (expr is AST.DoubleLiteral) return new BoundLiteral(((AST.DoubleLiteral)expr).Value);
-            if (expr is AST.BoolLiteral) return new BoundLiteral(((AST.BoolLiteral)expr).Value);
-            if (expr is AST.NullLiteral) return new BoundLiteral(null);
-            if (expr is AST.BinaryStringLiteral) return new BoundLiteral(((AST.BinaryStringLiteral)expr).Value);
+            if (expr is AST.LongIntLiteral longIntLit) return new BoundLiteral(longIntLit.Value);
+            if (expr is AST.StringLiteral stringLit) return new BoundLiteral(stringLit.Value);
+            if (expr is AST.DoubleLiteral doubleLit) return new BoundLiteral(doubleLit.Value);
+            if (expr is AST.BoolLiteral boolLit) return new BoundLiteral(boolLit.Value.AsObject());
+            if (expr is AST.NullLiteral nullLit) return new BoundLiteral(null);
+            if (expr is AST.BinaryStringLiteral binStringLit) return new BoundLiteral(binStringLit.Value);
 
             throw new NotImplementedException();
         }
 
-        public static ConstantValue TryGetConstantValue(PhpCompilation compilation, AST.Expression value)
+        /// <summary>
+        /// Updates <paramref name="expr"/>'s <see cref="BoundAccess"/> to <see cref="BoundAccess.ReadRef"/>.
+        /// </summary>
+        /// <param name="expr">Expression which access has to be updated.</param>
+        public static void BindReadRefAccess(BoundReferenceExpression expr)
         {
-            if (value is AST.Literal) return CreateConstant((AST.Literal)value);
-            if (value is AST.GlobalConstUse) return CreateConstant((AST.GlobalConstUse)value);
+            if (expr == null || expr.Access.IsReadRef) return;
 
-            return null;
+            expr.Access = expr.Access.WithReadRef();
+            BindEnsureAccess(expr); // parent expression chain has to be updated as well
         }
 
-        static ConstantValue CreateConstant(AST.Literal expr)
+        /// <summary>
+        /// Updates <paramref name="expr"/>'s <see cref="BoundAccess"/> to <see cref="BoundAccess.Write"/>.
+        /// </summary>
+        /// <param name="expr">Expression which access has to be updated.</param>
+        public static void BindWriteAccess(BoundReferenceExpression expr)
         {
-            if (expr is AST.LongIntLiteral) return ConstantValue.Create(((AST.LongIntLiteral)expr).Value);
-            if (expr is AST.StringLiteral) return ConstantValue.Create(((AST.StringLiteral)expr).Value);
-            if (expr is AST.DoubleLiteral) return ConstantValue.Create(((AST.DoubleLiteral)expr).Value);
-            if (expr is AST.BoolLiteral) return ConstantValue.Create(((AST.BoolLiteral)expr).Value);
-            if (expr is AST.NullLiteral) return ConstantValue.Create(null);
-            //if (expr is BinaryStringLiteral) return ConstantValue.Create(((BinaryStringLiteral)expr).Value);
+            if (expr == null || expr.Access.IsWrite) return;
 
-            return null;
+            expr.Access = expr.Access.WithWrite(0);
+            BindEnsureAccess(expr); // parent expression chain has to be updated as well
         }
 
-        static ConstantValue CreateConstant(AST.GlobalConstUse expr)
+        /// <summary>
+        /// Updates <paramref name="expr"/>'s <see cref="BoundAccess"/> to <see cref="BoundAccess.Write"/>.
+        /// </summary>
+        /// <param name="expr">Expression which access has to be updated.</param>
+        public static void BindEnsureArrayAccess(BoundReferenceExpression expr)
         {
-            if (expr.Name == QualifiedName.Null) return ConstantValue.Null;
-            if (expr.Name == QualifiedName.True) return ConstantValue.True;
-            if (expr.Name == QualifiedName.False) return ConstantValue.False;
+            if (expr == null || expr.Access.IsWrite) return;
 
-            return null;
+            expr.Access = expr.Access.WithEnsureArray();
+            BindEnsureAccess(expr); // parent expression chain has to be updated as well
         }
+
+        protected static void BindEnsureAccess(BoundExpression expr)
+        {
+            if (expr is BoundArrayItemEx arritem)
+            {
+                arritem.Array.Access = arritem.Array.Access.WithEnsureArray();
+                BindEnsureAccess(arritem.Array);
+            }
+        }
+    }
+
+    internal sealed class GeneratorSemanticsBinder : SemanticsBinder
+    {
+        #region FieldsAndProperties
+
+        /// <summary>
+        /// Found yield statements (needed for ControlFlowGraph)
+        /// </summary>
+        public override ImmutableArray<BoundYieldStatement> Yields { get => _yields.ToImmutableArray(); }
+
+        public override int StatesCount => _yields.Count;
+
+        readonly List<BoundYieldStatement> _yields = new List<BoundYieldStatement>();
+
+        readonly HashSet<AST.LangElement> _yieldsToStatementRootPath = new HashSet<AST.LangElement>();
+        int _underYieldLikeExLevel = -1;
+
+        #endregion
+
+        #region PreBoundBlocks
+
+        private BoundBlock _preBoundBlockFirst;
+        private BoundBlock _preBoundBlockLast;
+
+        private BoundBlock NewBlock() => _newBlockFunc();
+        private Func<BoundBlock> _newBlockFunc;
+
+        private IEnumerable<TryCatchEdge> _tryScopes;
+
+        BoundYieldStatement NewYieldStatement(BoundExpression valueExpression, BoundExpression keyExpression,
+            AST.LangElement syntax = null,
+            bool isYieldFrom = false)
+        {
+            var yieldStmt = new BoundYieldStatement(_yields.Count + 1, valueExpression, keyExpression, _tryScopes)
+            {
+                IsYieldFrom = isYieldFrom,
+            }
+            .WithSyntax(syntax);
+
+            _yields.Add(yieldStmt);
+
+            return yieldStmt;
+        }
+
+        void InitPreBoundBlocks()
+        {
+            _preBoundBlockFirst = _preBoundBlockFirst ?? NewBlock();
+            _preBoundBlockLast = _preBoundBlockLast ?? _preBoundBlockFirst;
+        }
+
+        BoundBlock CurrentPreBoundBlock
+        {
+            get { InitPreBoundBlocks(); return _preBoundBlockLast; }
+            set { _preBoundBlockLast = value; }
+        }
+
+        bool AnyPreBoundItems
+        {
+            get
+            {
+                Debug.Assert((_preBoundBlockFirst == null) == (_preBoundBlockLast == null));
+                return _preBoundBlockFirst != null;
+            }
+        }
+
+        #endregion
+
+        #region Construction
+
+        public GeneratorSemanticsBinder(PhpCompilation compilation, ImmutableArray<AST.IYieldLikeEx> yields, LocalsTable locals, SourceRoutineSymbol routine, SourceTypeSymbol self)
+            : base(compilation, routine.ContainingFile.SyntaxTree, locals, routine, self)
+        {
+            Debug.Assert(Routine != null);
+
+            // TODO: move this to SourceRoutineSymbol ctor?
+            Routine.Flags |= RoutineFlags.IsGenerator;
+
+            // save all parents of all yieldLikeEx in current routine -> will need to realocate all expressions on path and in its children
+            //  - the ones to the left from yieldLikeEx<>root path need to get moved in statements before yieldLikeEx
+            //  - the ones on the path could be left alone but if we prepend the ones on the right we must also move the ones on the path as they should get executed before the right ones
+            //  - the ones to the right could be left alone but it's easier to move them as well; need to go after yieldLikeStatement
+            foreach (var yieldLikeEx in yields)
+            {
+                Debug.Assert(yieldLikeEx is AST.LangElement);
+                var parent = ((AST.LangElement)yieldLikeEx).ContainingElement;
+                // add all parents until reaching the top of current statement tree
+                while (!(parent is AST.MethodDecl || parent is AST.IStatement))
+                {
+                    _yieldsToStatementRootPath.Add(parent);
+                    parent = parent.ContainingElement;
+                }
+            }
+        }
+
+        public override void SetupBuilder(Func<BoundBlock> newBlockFunc)
+        {
+            Debug.Assert(newBlockFunc != null);
+
+            base.SetupBuilder(newBlockFunc);
+
+            //
+            _newBlockFunc = newBlockFunc;
+        }
+
+        #endregion
+
+        #region GeneralOverrides
+
+        public override void WithTryScopes(IEnumerable<TryCatchEdge> tryScopes)
+        {
+            _tryScopes = tryScopes;
+        }
+
+        public override BoundItemsBag<BoundExpression> BindWholeExpression(AST.Expression expr, BoundAccess access)
+        {
+            Debug.Assert(!AnyPreBoundItems);
+
+            var boundItem = BindExpression(expr, access);
+            var boundBag = new BoundItemsBag<BoundExpression>(boundItem, _preBoundBlockFirst, _preBoundBlockLast);
+
+            ClearPreBoundBlocks();
+
+            return boundBag;
+        }
+
+        public override BoundItemsBag<BoundStatement> BindWholeStatement(AST.Statement stmt)
+        {
+            Debug.Assert(!AnyPreBoundItems);
+
+            var boundItem = BindStatement(stmt);
+            var boundBag = new BoundItemsBag<BoundStatement>(boundItem, _preBoundBlockFirst, _preBoundBlockLast);
+
+            ClearPreBoundBlocks();
+            return boundBag;
+        }
+
+        protected override BoundExpression BindExpression(AST.Expression expr, BoundAccess access)
+        {
+            var _underYieldLikeExLevelOnEnter = _underYieldLikeExLevel;
+
+            // can't use only AST to determine whether we're under yield<>root route 
+            //  -> there're expressions (such as foreach variable) outside in terms of semantics tree
+            //  -> for those we don't want to do any moving (can actually be a problem for those)
+
+            // update _underYieldLikeExLevel
+            if (_underYieldLikeExLevel >= 0) { _underYieldLikeExLevel++; }
+            if (_yieldsToStatementRootPath.Contains(expr)) { _underYieldLikeExLevel = 0; }
+
+            var boundExpr = base.BindExpression(expr, access);
+
+            // move expressions on and directly under yieldLikeEx<>root path
+            if (_underYieldLikeExLevel == 1 || _underYieldLikeExLevel == 0)
+            {
+                boundExpr = MakeTmpCopyAndPrependAssigment(boundExpr, access);
+            }
+
+            _underYieldLikeExLevel = _underYieldLikeExLevelOnEnter;
+            return boundExpr;
+        }
+
+        protected override BoundStatement BindStatement(AST.Statement stmt)
+        {
+            var _underYieldLikeExLevelOnEnter = _underYieldLikeExLevel;
+
+            // update _underYieldLikeExLevel
+            if (_underYieldLikeExLevel >= 0) { _underYieldLikeExLevel++; }
+            if (_yieldsToStatementRootPath.Contains(stmt)) { _underYieldLikeExLevel = 0; }
+
+            var boundStatement = base.BindStatement(stmt);
+
+            _underYieldLikeExLevel = _underYieldLikeExLevelOnEnter;
+            return boundStatement;
+        }
+        #endregion
+
+        #region SpecificExOverrides
+
+        protected override BoundExpression BindBinaryEx(AST.BinaryEx expr)
+        {
+            // if not a short-circuit operator -> use normal logic for binding
+            if (!(expr.Operation == AST.Operations.And || expr.Operation == AST.Operations.Or || expr.Operation == AST.Operations.Coalesce))
+            { return base.BindBinaryEx(expr); }
+
+            // create/get a source block defensively before potential rightExprBag.PreBoundBlocks (it needs to have a smaller Ordinal)
+            var currBlock = CurrentPreBoundBlock;
+
+            // left operand is always evaluated -> handle normally
+            var leftExpr = BindExpression(expr.LeftExpr, BoundAccess.Read);
+
+            // right operand & its pre-bound statements might not be evaluated due to short-circuit evaluation
+            // get all of the pre-bound statements and convert them to statemenets conditioned by short-cirtuit-eval logic
+            var rightExprBag = BindExpressionWithSeparatePreBoundStatements(expr.RightExpr, BoundAccess.Read);
+
+            if (!rightExprBag.IsOnlyBoundElement)
+            {
+                // make a defensive copy if multiple evaluations could be a problem for left expr (which serves as the condition)
+                // no need to worry about order of execution: right bag contains preBoundStatements  
+                // .. -> we are on yield<>root path -> expression to the left are already prepended
+                leftExpr = MakeTmpCopyAndPrependAssigment(leftExpr, BoundAccess.Read);
+
+                // create a condition expr. that is true only when right operand would have to be evaluated
+                BoundExpression condition = null;
+                switch (expr.Operation)
+                {
+                    case AST.Operations.And:
+                        condition = leftExpr; // left is true
+                        break;
+                    case AST.Operations.Or:
+                        condition = new BoundUnaryEx(leftExpr, AST.Operations.LogicNegation); // left is false
+                        break;
+                    case AST.Operations.Coalesce:
+                        if (leftExpr is BoundReferenceExpression leftRef) // left is not set or null
+                        {
+                            condition = new BoundUnaryEx(
+                                new BoundIsSetEx(leftRef),
+                                AST.Operations.LogicNegation
+                                );
+                        }
+                        else
+                        {
+                            // Template: "is_null( LValue )"
+                            condition = new BoundGlobalFunctionCall(
+                                NameUtils.SpecialNames.is_null, null,
+                                ImmutableArray.Create(BoundArgument.Create(leftExpr)));
+                        }
+                        break;
+                    default:
+                        throw ExceptionUtilities.Unreachable;
+                }
+
+                // create a conditional edge and set the last (current) pre-bound block to the conditional edge's end block
+                CurrentPreBoundBlock = CreateConditionalEdge(currBlock, condition, rightExprBag.PreBoundBlockFirst, rightExprBag.PreBoundBlockLast, null, null);
+            }
+
+            return new BoundBinaryEx(
+                leftExpr,
+                rightExprBag.BoundElement,
+                expr.Operation);
+        }
+
+        protected override BoundExpression BindConditionalEx(AST.ConditionalEx expr, BoundAccess access)
+        {
+            var hastruebranch = (expr.TrueExpr != null);
+
+            var condExpr = BindExpression(expr.CondExpr, hastruebranch ? BoundAccess.Read : access.WithRead());
+
+            // create/get a source block defensively before potential true/falseExprBag.PreBoundBlocks (it needs to have a smaller Ordinal)
+            var currBlock = CurrentPreBoundBlock;
+
+            // get expressions and their pre-bound elements for both branches
+            var trueExprBag = BindExpressionWithSeparatePreBoundStatements(expr.TrueExpr, access);
+            var falseExprBag = BindExpressionWithSeparatePreBoundStatements(expr.FalseExpr, access);
+
+            // if at least branch has any pre-bound statements we need to condition them
+            if (!trueExprBag.IsOnlyBoundElement || !falseExprBag.IsOnlyBoundElement)
+            {
+                // make a defensive copy of condition, would be evaluated twice otherwise (conditioned prebound blocks and original position)
+                // no need to worry about order of execution: either true or false branch contains preBoundStatements  
+                // .. -> we are on yield<>root path -> expression to the left are already prepended
+                condExpr = MakeTmpCopyAndPrependAssigment(condExpr, BoundAccess.Read);
+
+                // create a conditional edge and set the last (current) pre-bound block to the conditional edge's end block
+                CurrentPreBoundBlock = CreateConditionalEdge(currBlock, condExpr,
+                    trueExprBag.PreBoundBlockFirst, trueExprBag.PreBoundBlockLast,
+                    falseExprBag.PreBoundBlockFirst, falseExprBag.PreBoundBlockLast);
+            }
+
+            return new BoundConditionalEx(
+                condExpr,
+                trueExprBag.BoundElement,
+                falseExprBag.BoundElement);
+        }
+
+        protected override BoundYieldEx BindYieldEx(AST.YieldEx expr, BoundAccess access)
+        {
+            // Reference: https://github.com/dotnet/roslyn/blob/05d923831e1bc2a88918a2073fba25ab060dda0c/src/Compilers/CSharp/Portable/Binder/Binder_Statements.cs#L194
+
+            // TODO: Throw error when trying to iterate a non-reference generator by reference 
+            var valueaccess = _locals.Routine.SyntaxSignature.AliasReturn
+                    ? BoundAccess.ReadRef
+                    : BoundAccess.Read;
+
+            // bind value and key expressions
+            var boundValueExpr = (expr.ValueExpr != null) ? BindExpression(expr.ValueExpr, valueaccess) : null;
+            var boundKeyExpr = (expr.KeyExpr != null) ? BindExpression(expr.KeyExpr) : null;
+
+            // bind yield statement (represents return & continuation)
+            CurrentPreBoundBlock.Add(NewYieldStatement(boundValueExpr, boundKeyExpr, syntax: expr));
+
+            // return BoundYieldEx representing a reference to a value sent to the generator
+            return new BoundYieldEx();
+        }
+
+        protected override BoundExpression BindYieldFromEx(AST.YieldFromEx expr, BoundAccess access)
+        {
+            var aliasedValues = _locals.Routine.SyntaxSignature.AliasReturn;
+            var tmpVar = MakeTmpCopyAndPrependAssigment(BindExpression(expr.ValueExpr), BoundAccess.Read);
+
+            /* Template:
+             * foreach (<tmp> => <key> as <value>) {
+             *     yield <key> => <value>;
+             * }
+             * return <tmp>.getReturn()
+             */
+
+            string valueVarName = NextTempVariableName();
+            string keyVarName = valueVarName + "k";
+
+            var move = NewBlock();
+            var body = NewBlock();
+            var end = NewBlock();
+
+            var enumereeEdge = new ForeachEnumereeEdge(CurrentPreBoundBlock, move, tmpVar, aliasedValues);
+
+            // MoveNext()
+            var moveEdge = new ForeachMoveNextEdge(
+                move, body, end, enumereeEdge,
+                keyVar: new BoundTemporalVariableRef(keyVarName).WithAccess(BoundAccess.Write),
+                valueVar: new BoundTemporalVariableRef(valueVarName).WithAccess(aliasedValues ? BoundAccess.Write.WithWriteRef(0) : BoundAccess.Write),
+                moveSpan: default(Microsoft.CodeAnalysis.Text.TextSpan));
+
+            // body:
+            // Template: yield key => value
+            body.Add(
+                NewYieldStatement(
+                    valueExpression: new BoundTemporalVariableRef(valueVarName).WithAccess(aliasedValues ? BoundAccess.ReadRef : BoundAccess.Read),
+                    keyExpression: new BoundTemporalVariableRef(keyVarName).WithAccess(BoundAccess.Read),
+                    isYieldFrom: true));
+
+            // goto move
+            new SimpleEdge(body, move);
+
+            // end:
+            CurrentPreBoundBlock = end;
+
+            // GET_RETURN( tmp as Generator )
+            return new BoundYieldFromEx(tmpVar);
+        }
+
+        #endregion
+
+        #region Helpers
+
+        public struct BoundSynthesizedVariableInfo
+        {
+            public BoundReferenceExpression BoundExpr;
+            public BoundAssignEx Assignment;
+        }
+
+        private void ClearPreBoundBlocks()
+        {
+            _preBoundBlockFirst = null;
+            _preBoundBlockLast = null;
+        }
+
+        /// <summary>
+        /// Assigns an expression to a temp variable, puts the assigment to <c>_preCurrentlyBinded</c>, and returns reference to the temp variable.
+        /// </summary>
+        private BoundExpression MakeTmpCopyAndPrependAssigment(BoundExpression boundExpr, BoundAccess access)
+        {
+            // no need to do anything if the expression is constant because neither multiple evaluation nor different order of eval is a problem
+            if (boundExpr.IsConstant()) { return boundExpr; }
+
+            var assignVarTouple = CreateAndAssignSynthesizedVariable(boundExpr, access, NextTempVariableName());
+
+            CurrentPreBoundBlock.Add(new BoundExpressionStatement(assignVarTouple.Assignment)); // assigment
+            return assignVarTouple.BoundExpr; // temp variable ref
+        }
+
+        internal static BoundSynthesizedVariableInfo CreateAndAssignSynthesizedVariable(BoundExpression expr, BoundAccess access, string name)
+        {
+            // determine whether the synthesized variable should be by ref (for readRef and writes) or a normal PHP copy
+            var refAccess = (access.IsReadRef || access.IsWrite);
+
+            // bind assigment target variable with appropriate access
+            var targetVariable = new BoundTemporalVariableRef(name)
+                .WithAccess(refAccess ? BoundAccess.Write.WithWriteRef(0) : BoundAccess.Write);
+
+            // set appropriate access of the original value expression
+            var valueBeingMoved = (refAccess) ? expr.WithAccess(BoundAccess.ReadRef) : expr.WithAccess(BoundAccess.Read);
+
+            // bind assigment and reference to the created synthesized variable
+            var assigment = new BoundAssignEx(targetVariable, valueBeingMoved);
+            var boundExpr = new BoundTemporalVariableRef(name).WithAccess(access);
+
+            return new BoundSynthesizedVariableInfo() { BoundExpr = boundExpr, Assignment = assigment };
+        }
+
+        /// <summary>
+        /// Creates a conditional edge and returns its endBlock.
+        /// </summary>
+        private BoundBlock CreateConditionalEdge(BoundBlock sourceBlock, BoundExpression condExpr,
+            BoundBlock trueBlockStart, BoundBlock trueBlockEnd, BoundBlock falseBlockStart, BoundBlock falseBlockEnd)
+        {
+            Debug.Assert(trueBlockStart != null || falseBlockStart != null);
+            Debug.Assert(trueBlockStart == null ^ trueBlockEnd != null);
+            Debug.Assert(falseBlockStart == null ^ falseBlockEnd != null);
+
+            // if only false branch is non-empty flip the condition and conditioned blocks so that true is non-empty
+            if (trueBlockStart == null)
+            {
+                condExpr = new BoundUnaryEx(condExpr, AST.Operations.LogicNegation);
+                trueBlockStart = falseBlockStart;
+                trueBlockEnd = falseBlockEnd;
+                falseBlockStart = null;
+                falseBlockEnd = null;
+            }
+
+            var endBlock = NewBlock();
+            falseBlockStart = falseBlockStart ?? endBlock;
+
+            new ConditionalEdge(sourceBlock, trueBlockStart, falseBlockStart, condExpr);
+            new SimpleEdge(trueBlockEnd, endBlock);
+            if (falseBlockStart != endBlock) { new SimpleEdge(falseBlockEnd, endBlock); }
+
+            return endBlock;
+        }
+
+        private BoundItemsBag<BoundExpression> BindExpressionWithSeparatePreBoundStatements(AST.Expression expr, BoundAccess access)
+        {
+            if (expr == null) { return BoundItemsBag<BoundExpression>.Empty; }
+
+            // save original preBoundBlocks
+            var originalPreBoundFirst = _preBoundBlockFirst;
+            var originalPreBoundLast = _preBoundBlockLast;
+
+            ClearPreBoundBlocks(); // clean state
+            var currExprBag = BindWholeExpression(expr, access);
+
+            // restore original preBoundBlocks
+            _preBoundBlockFirst = originalPreBoundFirst;
+            _preBoundBlockLast = originalPreBoundLast;
+
+            return currExprBag;
+        }
+
+        #endregion
     }
 }

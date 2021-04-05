@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
+using System.Diagnostics;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
@@ -22,30 +23,6 @@ namespace Pchp.CodeAnalysis.Symbols
         internal MethodSymbol EntryPointSymbol { get; set; }
 
         /// <summary>
-        /// Method that enumerates all referenced global functions.
-        /// 
-        /// EnumerateReferencedFunctions(Action&lt;string, RuntimeMethodHandle&gt; callback)
-        /// </summary>
-        internal MethodSymbol EnumerateReferencedFunctionsSymbol => _enumerateReferencedFunctionsSymbol ?? (_enumerateReferencedFunctionsSymbol = CreateEnumerateReferencedFunctionsSymbol());
-        MethodSymbol _enumerateReferencedFunctionsSymbol;
-
-        /// <summary>
-        /// Method that enumerates all script files.
-        /// 
-        /// EnumerateScripts(Action&lt;string, RuntimeMethodHandle&gt; callback)
-        /// </summary>
-        internal MethodSymbol EnumerateScriptsSymbol => _enumerateScripsSymbol ?? (_enumerateScripsSymbol = CreateEnumerateScriptsSymbol());
-        MethodSymbol _enumerateScripsSymbol;
-
-        /// <summary>
-        /// Method that enumerates all app-wide global constants.
-        /// 
-        /// EnumerateScripts(Action&lt;string name, PhpValue value, bool ignorecase&gt; callback)
-        /// </summary>
-        internal MethodSymbol EnumerateConstantsSymbol => _enumerateConstantsSymbol ?? (_enumerateConstantsSymbol = CreateEnumerateConstantsSymbol());
-        MethodSymbol _enumerateConstantsSymbol;
-
-        /// <summary>
         /// Additional type members.
         /// </summary>
         private List<Symbol> _lazyMembers = new List<Symbol>();
@@ -57,9 +34,13 @@ namespace Pchp.CodeAnalysis.Symbols
 
         public override int Arity => 0;
 
+        internal override bool HasTypeArgumentsCustomModifiers => false;
+
+        public override ImmutableArray<CustomModifier> GetTypeArgumentCustomModifiers(int ordinal) => GetEmptyTypeArgumentCustomModifiers(ordinal);
+
         public override Symbol ContainingSymbol => _compilation.SourceModule;
 
-        internal override IModuleSymbol ContainingModule => _compilation.SourceModule;
+        internal override ModuleSymbol ContainingModule => _compilation.SourceModule;
 
         public override Accessibility DeclaredAccessibility => Accessibility.Internal;
 
@@ -77,13 +58,7 @@ namespace Pchp.CodeAnalysis.Symbols
 
         public override bool IsStatic => true;
 
-        public override ImmutableArray<Location> Locations
-        {
-            get
-            {
-                throw new NotImplementedException();
-            }
-        }
+        public override bool IsSerializable => false;
 
         public override string Name => WellKnownPchpNames.DefaultScriptClassName;
 
@@ -107,16 +82,13 @@ namespace Pchp.CodeAnalysis.Symbols
 
         public override ImmutableArray<Symbol> GetMembers()
         {
-            var list = new List<Symbol>()
-            {
-                this.EnumerateReferencedFunctionsSymbol,
-                this.EnumerateScriptsSymbol,
-                this.EnumerateConstantsSymbol,
-            };
+            var list = new List<Symbol>();
 
             //
             if (EntryPointSymbol != null)
+            {
                 list.Add(EntryPointSymbol);
+            }
 
             //
             list.AddRange(_lazyMembers);
@@ -126,6 +98,8 @@ namespace Pchp.CodeAnalysis.Symbols
         }
 
         public override ImmutableArray<Symbol> GetMembers(string name) => GetMembers().Where(m => m.Name == name).AsImmutable();
+
+        public override ImmutableArray<Symbol> GetMembersByPhpName(string name) => ImmutableArray<Symbol>.Empty;
 
         public override ImmutableArray<NamedTypeSymbol> GetTypeMembers() => _lazyMembers.OfType<NamedTypeSymbol>().AsImmutable();
 
@@ -138,56 +112,5 @@ namespace Pchp.CodeAnalysis.Symbols
         internal override ImmutableArray<NamedTypeSymbol> GetInterfacesToEmit() => ImmutableArray<NamedTypeSymbol>.Empty;
 
         public override ImmutableArray<MethodSymbol> StaticConstructors => ImmutableArray<MethodSymbol>.Empty;
-
-        /// <summary>
-        /// Method that enumerates all referenced global functions.
-        /// EnumerateReferencedFunctions(Action&lt;string, RuntimeMethodHandle&gt; callback)
-        /// </summary>
-        MethodSymbol CreateEnumerateReferencedFunctionsSymbol()
-        {
-            var compilation = DeclaringCompilation;
-            var action_T2 = compilation.GetWellKnownType(WellKnownType.System_Action_T2);
-            var action_string_method = action_T2.Construct(compilation.CoreTypes.String, compilation.CoreTypes.RuntimeMethodHandle);
-
-            var method = new SynthesizedMethodSymbol(this, "EnumerateReferencedFunctions", true, false, compilation.CoreTypes.Void, Accessibility.Public);
-            method.SetParameters(new SynthesizedParameterSymbol(method, action_string_method, 0, RefKind.None, "callback"));
-
-            //
-            return method;
-        }
-
-        /// <summary>
-        /// Method that enumerates all script Main functions.
-        /// EnumerateScripts(Action&lt;string, RuntimeMethodHandle&gt; callback)
-        /// </summary>
-        MethodSymbol CreateEnumerateScriptsSymbol()
-        {
-            var compilation = DeclaringCompilation;
-            var action_T2 = compilation.GetWellKnownType(WellKnownType.System_Action_T2);
-            var action_string_method = action_T2.Construct(compilation.CoreTypes.String, compilation.CoreTypes.RuntimeMethodHandle);
-
-            var method = new SynthesizedMethodSymbol(this, "EnumerateScripts", true, false, compilation.CoreTypes.Void, Accessibility.Public);
-            method.SetParameters(new SynthesizedParameterSymbol(method, action_string_method, 0, RefKind.None, "callback"));
-
-            //
-            return method;
-        }
-
-        /// <summary>
-        /// Method that enumerates all app-wide global constants.
-        /// EnumerateConstants(Action&lt;string, PhpValue, bool&gt; callback)
-        /// </summary>
-        MethodSymbol CreateEnumerateConstantsSymbol()
-        {
-            var compilation = DeclaringCompilation;
-            var action_T3 = compilation.GetWellKnownType(WellKnownType.System_Action_T3);
-            var action_string_value_bool = action_T3.Construct(compilation.CoreTypes.String, compilation.CoreTypes.PhpValue, compilation.CoreTypes.Boolean);
-
-            var method = new SynthesizedMethodSymbol(this, "EnumerateConstants", true, false, compilation.CoreTypes.Void, Accessibility.Public);
-            method.SetParameters(new SynthesizedParameterSymbol(method, action_string_value_bool, 0, RefKind.None, "callback"));
-
-            //
-            return method;
-        }
     }
 }

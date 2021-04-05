@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using System.Reflection.Metadata;
 
 namespace Pchp.CodeAnalysis.Symbols
 {
@@ -20,20 +21,29 @@ namespace Pchp.CodeAnalysis.Symbols
             var diagnostic = DiagnosticBag.GetInstance();
 
             var ctor = new SynthesizedCtorSymbol(this);
-                        
+
             var body = MethodGenerator.GenerateMethodBody(module, ctor, (il) =>
             {
-                var cg = new CodeGenerator(il, module, diagnostic, OptimizationLevel.Release, false, this, null, new ArgPlace(this, 0));
-
-                foreach (var fld in this.Fields)
+                var cg = new CodeGenerator(il, module, diagnostic, module.Compilation.Options.OptimizationLevel, false, this, null, new ArgPlace(this, 0))
                 {
-                    if (fld.RequiresContext)
+                    CallerType = this.ContainingType,
+                    ContainingFile = _class.ContainingFile,
+                };
+
+                // base..ctor()
+                cg.EmitThis();   // this
+                il.EmitCall(module, diagnostic, ILOpCode.Call, this.BaseType.InstanceConstructors.Single());   // .ctor()
+
+                //
+                foreach (var p in this.Fields.Cast<IPhpPropertySymbol>())
+                {
+                    if (p.RequiresContext)
                     {
                         requiresInit = true;
                     }
                     else
                     {
-                        fld.EmitInit(cg);
+                        p.EmitInit(cg);
                     }
                 }
 
@@ -61,17 +71,21 @@ namespace Pchp.CodeAnalysis.Symbols
             // override IStaticInit.Init(Context) { .. }
 
             var initMethod = new SynthesizedMethodSymbol(this, "Init", false, true, tt.Void, Accessibility.Public);
-            initMethod.SetParameters(new SynthesizedParameterSymbol(initMethod, tt.Context, 0, RefKind.None, "ctx"));
+            initMethod.SetParameters(new SynthesizedParameterSymbol(initMethod, tt.Context, 0, RefKind.None, SpecialParameterSymbol.ContextName));
 
             var body = MethodGenerator.GenerateMethodBody(module, initMethod, (il) =>
             {
-                var cg = new CodeGenerator(il, module, diagnostic, OptimizationLevel.Release, false, this, new ArgPlace(tt.Context, 1), new ArgPlace(this, 0));
-
-                foreach (var fld in this.Fields)
+                var cg = new CodeGenerator(il, module, diagnostic, module.Compilation.Options.OptimizationLevel, false, this, new ArgPlace(tt.Context, 1), new ArgPlace(this, 0), initMethod)
                 {
-                    if (fld.RequiresContext)
+                    CallerType = this.ContainingType,
+                    ContainingFile = _class.ContainingFile,
+                };
+
+                foreach (var p in this.Fields.Cast<IPhpPropertySymbol>())
+                {
+                    if (p.RequiresContext)
                     {
-                        fld.EmitInit(cg);
+                        p.EmitInit(cg);
                     }
                 }
 

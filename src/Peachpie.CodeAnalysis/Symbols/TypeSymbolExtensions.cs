@@ -1,4 +1,5 @@
 ﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.PooledObjects;
 using Roslyn.Utilities;
 using System;
 using System.Collections.Generic;
@@ -33,6 +34,42 @@ namespace Pchp.CodeAnalysis.Symbols
             return actual;
         }
 
+        /// <summary>Assertion that type is valid.</summary>
+        public static TypeSymbol ExpectValid(this TypeSymbol actual)
+        {
+            Debug.Assert(actual.IsValidType());
+            return actual;
+        }
+
+        /// <summary>Gets value indicating the type is not null, not ambiguous and not error type.</summary>
+        public static bool IsValidType(this TypeSymbol type) => !IsErrorTypeOrNull(type);
+
+        public static bool IsTraitType(this TypeSymbol type)
+        {
+            return type != null && type.OriginalDefinition is IPhpTypeSymbol phpt && phpt.IsTrait;
+        }
+
+        /// <summary>
+        /// Gets value indicating the type represents PHP script (<see cref="SourceFileSymbol"/>).
+        /// </summary>
+        public static bool IsPhpSourceFile(this ITypeSymbol type) => type is IPhpScriptTypeSymbol phpt && phpt.MainMethod != null;
+
+        public static bool IsPharEntry(this ITypeSymbol type) => type is NamedTypeSymbol ntype && ntype.NamespaceName.StartsWith(WellKnownPchpNames.PharEntryRootNamespace);
+
+        /// <summary>
+        /// Gets value indicating the type is a PHP user type (declared in a PHP code).
+        /// </summary>
+        public static bool IsPhpUserType(this TypeSymbol/*!*/type) =>
+            type.OriginalDefinition is SourceTypeSymbol ||  // either declared in source code
+            (type.TryGetPhpTypeAttribute(out _, out var fname, out _) && fname != null); // or referenced with [PhpType("name", "path to original PHP file")]
+
+        /// <summary>
+        /// Gets value indicating the type is a PHP type (annotated with [PhpTypeAttribute] (and/or declared in user's code).
+        /// </summary>
+        public static bool IsPhpType(this TypeSymbol/*!*/type) =>
+            type.OriginalDefinition is SourceTypeSymbol ||  // either declared in source code
+            (type.TryGetPhpTypeAttribute(out _, out _, out _)); // or having [PhpTypeAttribute]
+
         public static bool ImplementsInterface(this TypeSymbol subType, TypeSymbol superInterface/*, ref HashSet<DiagnosticInfo> useSiteDiagnostics*/)
         {
             if (subType == superInterface)
@@ -55,6 +92,14 @@ namespace Pchp.CodeAnalysis.Symbols
             return type.IsReferenceType || type.IsNullableType();// || type.IsPointerType();
         }
 
+        /// <summary>
+        /// Type is PhpValue or PhpAlias.
+        /// </summary>
+        public static bool CanBePhpAlias(this TypeSymbol type)
+        {
+            return Is_PhpValue(type) || Is_PhpAlias(type);
+        }
+
         public static bool CanBeConst(this TypeSymbol typeSymbol)
         {
             Debug.Assert((object)typeSymbol != null);
@@ -62,20 +107,89 @@ namespace Pchp.CodeAnalysis.Symbols
             return typeSymbol.IsReferenceType || typeSymbol.IsEnumType() || typeSymbol.SpecialType.CanBeConst();
         }
 
+        public static bool Is_PhpArray(this ITypeSymbol t)
+        {
+            return t.MetadataName == "PhpArray" && (t.ContainingAssembly as AssemblySymbol)?.IsPeachpieCorLibrary == true;
+        }
+
+        public static bool Is_PhpResource(this ITypeSymbol t)
+        {
+            return t.MetadataName == "PhpResource" && (t.ContainingAssembly as AssemblySymbol)?.IsPeachpieCorLibrary == true;
+        }
+
+        public static bool Is_PhpAlias(this ITypeSymbol t)
+        {
+            return t.MetadataName == "PhpAlias" && (t.ContainingAssembly as AssemblySymbol)?.IsPeachpieCorLibrary == true;
+        }
+
+        public static bool Is_PhpValue(this ITypeSymbol t)
+        {
+            return t.MetadataName == "PhpValue" && (t.ContainingAssembly as AssemblySymbol)?.IsPeachpieCorLibrary == true;
+        }
+
+        public static bool Is_PhpString(this ITypeSymbol t)
+        {
+            return t.MetadataName == "PhpString" && (t.ContainingAssembly as AssemblySymbol)?.IsPeachpieCorLibrary == true;
+        }
+
+        public static bool Is_IntStringKey(this ITypeSymbol t)
+        {
+            return t.MetadataName == "IntStringKey" && (t.ContainingAssembly as AssemblySymbol)?.IsPeachpieCorLibrary == true;
+        }
+
+        /// <summary>
+        /// Determines the type is <c>Func{Context,PhpValue}</c>.
+        /// </summary>
+        public static bool Is_Func_Context_PhpValue(this TypeSymbol t)
+        {
+            return Is_Func_Context_TResult(t, out var tresult) && tresult.Is_PhpValue();
+        }
+
+        /// <summary>
+        /// Determines the type is <c>Func{Context,TResult}</c>.
+        /// </summary>
+        public static bool Is_Func_Context_TResult(this TypeSymbol t, out TypeSymbol tresult)
+        {
+            if (t.IsDelegateType() && t is NamedTypeSymbol nt &&
+                nt.Arity == 2 &&
+                nt.ConstructedFrom.MetadataName == "Func`2" && // !!!
+                nt.TypeArguments[0].Name == "Context") // !!!
+            {
+                tresult = nt.TypeArguments[1];
+                return true;
+            }
+
+            tresult = null;
+            return false;
+        }
+
         public static bool IsOfType(this TypeSymbol t, TypeSymbol oftype)
         {
             if (oftype != null)
             {
-                HashSet<DiagnosticInfo> set = new HashSet<DiagnosticInfo>();
-                if (t.IsEqualToOrDerivedFrom(oftype, true, ref set))
+                if (t.Equals(oftype, ignoreDynamic: true))
+                {
                     return true;
+                }
 
-                if (oftype.IsInterfaceType() && t.AllInterfaces.Contains(oftype))
-                    return true;
+                if (oftype.IsClassType())
+                {
+                    HashSet<DiagnosticInfo> set = null;
+                    return t.IsDerivedFrom(oftype, true, ref set);
+                }
+                else if (oftype.IsInterfaceType())
+                {
+                    return t.ImplementsInterface(oftype);
+                }
             }
 
             //
             return false;
+        }
+
+        public static bool IsAssignableFrom(this TypeSymbol t, TypeSymbol fromtype)
+        {
+            return fromtype.IsOfType(t) || (fromtype.IsInterfaceType() && t.IsObjectType());
         }
 
         //public static bool IsNonNullableValueType(this TypeSymbol typeArgument)
@@ -112,14 +226,28 @@ namespace Pchp.CodeAnalysis.Symbols
             return original.SpecialType == SpecialType.System_Nullable_T;
         }
 
-        //public static TypeSymbol GetNullableUnderlyingType(this TypeSymbol type)
-        //{
-        //    Debug.Assert((object)type != null);
-        //    Debug.Assert(IsNullableType(type));
-        //    Debug.Assert(type is NamedTypeSymbol);  //not testing Kind because it may be an ErrorType
+        public static bool IsNullableType(this TypeSymbol type, out TypeSymbol tType)
+        {
+            if (IsNullableType(type))
+            {
+                tType = ((NamedTypeSymbol)type).TypeArguments[0];
+                return true;
+            }
+            else
+            {
+                tType = null;
+                return false;
+            }
+        }
 
-        //    return ((NamedTypeSymbol)type).TypeArgumentsNoUseSiteDiagnostics[0];
-        //}
+        public static TypeSymbol GetNullableUnderlyingType(this TypeSymbol type)
+        {
+            Debug.Assert((object)type != null);
+            Debug.Assert(IsNullableType(type));
+            Debug.Assert(type is NamedTypeSymbol);  //not testing Kind because it may be an ErrorType
+
+            return ((NamedTypeSymbol)type).TypeArgumentsNoUseSiteDiagnostics[0];
+        }
 
         //public static TypeSymbol StrippedType(this TypeSymbol type)
         //{
@@ -287,6 +415,11 @@ namespace Pchp.CodeAnalysis.Symbols
             return type.Kind == SymbolKind.ErrorType;
         }
 
+        public static bool IsErrorTypeOrNull(this TypeSymbol type)
+        {
+            return type == null || type.Kind == SymbolKind.ErrorType;
+        }
+
         //public static bool IsMethodTypeParameter(this TypeParameterSymbol p)
         //{
         //    return p.ContainingSymbol.Kind == SymbolKind.Method;
@@ -309,10 +442,21 @@ namespace Pchp.CodeAnalysis.Symbols
             return type.TypeKind == TypeKind.Array;
         }
 
-        public static bool IsSZArray(this TypeSymbol type)
+        public static bool IsSZArray(this ITypeSymbol type)
         {
             Debug.Assert((object)type != null);
             return type.TypeKind == TypeKind.Array && ((ArrayTypeSymbol)type).IsSZArray;
+        }
+
+        /// <summary>Gets value indicating the given type represents a <c>byte[]</c> array type.</summary>
+        public static bool IsByteArray(this ITypeSymbol type)
+        {
+            Debug.Assert((object)type != null);
+            return
+                type.TypeKind == TypeKind.Array &&
+                type is ArrayTypeSymbol array &&
+                array.IsSZArray &&
+                array.ElementType.SpecialType == SpecialType.System_Byte;
         }
 
         // If the type is a delegate type, it returns it. If the type is an
@@ -343,7 +487,6 @@ namespace Pchp.CodeAnalysis.Symbols
                 type.Name == "Expression" &&
                 CheckFullName(type.ContainingSymbol, s_expressionsNamespaceName);
         }
-
 
         /// <summary>
         /// return true if the type is constructed from a generic interface that 
@@ -571,8 +714,8 @@ namespace Pchp.CodeAnalysis.Symbols
 
                     case TypeKind.Pointer:
                         throw new NotImplementedException();
-                        //current = ((PointerTypeSymbol)current).PointedAtType;
-                        //continue;
+                    //current = ((PointerTypeSymbol)current).PointedAtType;
+                    //continue;
 
                     default:
                         throw ExceptionUtilities.UnexpectedValue(current.TypeKind);
@@ -967,6 +1110,11 @@ namespace Pchp.CodeAnalysis.Symbols
         //        }
         //    }
         //}
+
+        /// <summary>
+        /// Gets value indicating the type is <see cref="System.Void"/>.
+        /// </summary>
+        internal static bool IsVoid(this TypeSymbol type) => type.SpecialType == SpecialType.System_Void;
 
         //internal static bool IsVoidPointer(this TypeSymbol type)
         //{

@@ -1,4 +1,5 @@
 ﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.PooledObjects;
 using Roslyn.Utilities;
 using System;
 using System.Collections.Generic;
@@ -26,6 +27,19 @@ namespace Pchp.CodeAnalysis.Symbols
         /// can return it from Modules property as is.
         /// </summary>
         readonly ImmutableArray<ModuleSymbol> _modules;
+
+        /// <summary>
+        /// Optional full file path to the assembly.
+        /// </summary>
+        readonly string _filePath;
+
+        /// <summary>
+        /// An array of assemblies referenced by this assembly, which are linked (/l-ed) by 
+        /// each compilation that is using this AssemblySymbol as a reference. 
+        /// If this AssemblySymbol is linked too, it will be in this array too.
+        /// The array and its content is provided by ReferenceManager and must not be modified.
+        /// </summary>
+        private ImmutableArray<AssemblySymbol> _linkedReferencedAssemblies;
 
         /// <summary>
         /// Assembly is /l-ed by compilation that is using it as a reference.
@@ -58,7 +72,11 @@ namespace Pchp.CodeAnalysis.Symbols
 
         public override AssemblyIdentity Identity => _assembly.Identity;
 
+        public override Version AssemblyVersionPattern => null;
+
         public override ImmutableArray<ModuleSymbol> Modules => _modules;
+
+        internal DocumentationProvider DocumentationProvider => _documentationProvider;
 
         public override INamespaceSymbol GlobalNamespace => PrimaryModule.GlobalNamespace;
 
@@ -72,7 +90,19 @@ namespace Pchp.CodeAnalysis.Symbols
 
         public override bool IsCorLibrary => _specialAssembly == SpecialAssembly.CorLibrary;
 
-        public override bool IsPchpCorLibrary => _specialAssembly == SpecialAssembly.PchpCorLibrary;
+        public override bool IsPeachpieCorLibrary => _specialAssembly == SpecialAssembly.PeachpieCorLibrary;
+
+        internal override bool IsLinked => _isLinked;
+
+        internal override void SetLinkedReferencedAssemblies(ImmutableArray<AssemblySymbol> assemblies)
+        {
+            _linkedReferencedAssemblies = assemblies;
+        }
+
+        internal override ImmutableArray<AssemblySymbol> GetLinkedReferencedAssemblies()
+        {
+            return _linkedReferencedAssemblies;
+        }
 
         internal bool IsExtensionLibrary
         {
@@ -80,15 +110,9 @@ namespace Pchp.CodeAnalysis.Symbols
             {
                 if (_specialAssembly == SpecialAssembly.None && !_lazyIsExtensionLibraryResolved)
                 {
-                    var attrs = GetAttributes();
-                    foreach (var a in attrs)
+                    if (this.GetPhpExtensionAttribute() != null)
                     {
-                        var fullname = MetadataHelpers.BuildQualifiedName((a.AttributeClass as NamedTypeSymbol)?.NamespaceName, a.AttributeClass.Name);
-                        if (fullname == CoreTypes.PhpExtensionAttributeName)
-                        {
-                            _specialAssembly = SpecialAssembly.ExtensionLibrary;
-                            break;
-                        }
+                        _specialAssembly = SpecialAssembly.ExtensionLibrary;
                     }
 
                     _lazyIsExtensionLibraryResolved = true;
@@ -100,13 +124,16 @@ namespace Pchp.CodeAnalysis.Symbols
 
         public override string Name => _assembly.ManifestModule.Name;
 
-        internal PEAssemblySymbol(PEAssembly assembly, DocumentationProvider documentationProvider, bool isLinked, MetadataImportOptions importOptions)
+        public string FilePath => _filePath;
+
+        internal PEAssemblySymbol(PEAssembly assembly, DocumentationProvider documentationProvider, string filePath, bool isLinked, MetadataImportOptions importOptions)
         {
             Debug.Assert(assembly != null);
             Debug.Assert(documentationProvider != null);
 
             _assembly = assembly;
             _documentationProvider = documentationProvider;
+            _filePath = filePath;
 
             var modules = new ModuleSymbol[assembly.Modules.Length];
 
@@ -120,7 +147,7 @@ namespace Pchp.CodeAnalysis.Symbols
 
             if (IsPchpCor(assembly))
             {
-                _specialAssembly = SpecialAssembly.PchpCorLibrary;
+                _specialAssembly = SpecialAssembly.PeachpieCorLibrary;
 
                 // initialize CoreTypes
                 this.PrimaryModule.GlobalNamespace.GetTypeMembers();
@@ -142,14 +169,15 @@ namespace Pchp.CodeAnalysis.Symbols
 
         internal static bool IsPchpCor(PEAssembly ass) => ass.Identity.Name == "Peachpie.Runtime";
 
-        internal static PEAssemblySymbol Create(PortableExecutableReference reference)
+        internal static PEAssemblySymbol Create(PortableExecutableReference reference, PEAssembly ass = null, bool isLinked = true)
         {
-            var data = (AssemblyMetadata)reference.GetMetadata();
-            //var data = AssemblyMetadata.CreateFromFile(reference.FilePath);
-            var ass = data.GetAssembly();
+            if (ass == null)
+            {
+                ass = ((AssemblyMetadata)reference.GetMetadata()).GetAssembly();
+            }
 
             return new PEAssemblySymbol(
-                ass, DocumentationProvider.Default, true,
+                ass, reference.DocumentationProvider, reference.FilePath, isLinked,
                 IsPchpCor(ass) ? MetadataImportOptions.Internal : MetadataImportOptions.Public);
         }
 
@@ -208,14 +236,14 @@ namespace Pchp.CodeAnalysis.Symbols
                         containers.AddRange(
                             this.PrimaryModule.GlobalNamespace
                             .GetTypeMembers()
-                            .Where(t => t.IsStatic && t.DeclaredAccessibility == Accessibility.Public));
+                            .Where(t => t.IsStatic && t.DeclaredAccessibility == Accessibility.Public && !t.IsPhpHidden(DeclaringCompilation)));
 
                         //
-                        _lazyExtensionContainers = containers.ToImmutable();
+                        ImmutableInterlocked.InterlockedInitialize(ref _lazyExtensionContainers, containers.ToImmutable());
                     }
                     else
                     {
-                        _lazyExtensionContainers = ImmutableArray<NamedTypeSymbol>.Empty;
+                        ImmutableInterlocked.InterlockedInitialize(ref _lazyExtensionContainers, ImmutableArray<NamedTypeSymbol>.Empty);
                     }
                 }
 

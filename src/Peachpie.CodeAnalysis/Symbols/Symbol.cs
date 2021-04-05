@@ -12,6 +12,7 @@ using Microsoft.CodeAnalysis.Collections;
 using Microsoft.CodeAnalysis.Text;
 using Roslyn.Utilities;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.Symbols;
 using Pchp.CodeAnalysis.Symbols;
 
 namespace Pchp.CodeAnalysis
@@ -21,7 +22,7 @@ namespace Pchp.CodeAnalysis
     /// exposed by the compiler.
     /// </summary>
     [DebuggerDisplay("{GetDebuggerDisplay(), nq}")]
-    internal abstract partial class Symbol : ISymbol, IMessageSerializable
+    internal abstract partial class Symbol : ISymbol, ISymbolInternal
     {
         /// <summary>
         /// Gets the name of this symbol. Symbols without a name return the empty string; null is
@@ -159,7 +160,7 @@ namespace Pchp.CodeAnalysis
         /// Returns the module containing this symbol. If this symbol is shared across multiple
         /// modules, or doesn't belong to a module, returns null.
         /// </summary>
-        internal virtual IModuleSymbol ContainingModule
+        internal virtual ModuleSymbol ContainingModule
         {
             get
             {
@@ -206,7 +207,7 @@ namespace Pchp.CodeAnalysis
         /// metadata. Some symbols (for example, partial classes) may be defined in more than one
         /// location.
         /// </summary>
-        public abstract ImmutableArray<Location> Locations { get; }
+        public virtual ImmutableArray<Location> Locations => ImmutableArray<Location>.Empty;
 
         /// <summary>
         /// <para>
@@ -298,6 +299,12 @@ namespace Pchp.CodeAnalysis
         {
             get { return false; }
         }
+
+        /// <summary>
+        /// Returns true if this symbol is declared in the source code, but this declaration is proven
+        /// to be unreachable in execution. Symbols marked this way will not by emitted.
+        /// </summary>
+        public virtual bool IsUnreachable => false;
 
         /// <summary>
         /// Returns true if this symbol can be referenced by its name in code. Examples of symbols
@@ -449,7 +456,7 @@ namespace Pchp.CodeAnalysis
             }
 
             // this part is expected to disappear when inlining "someSymbol == null"
-            return (object)left == (object)right || right.Equals(left);
+            return (object)left == (object)right || right.Equals(left, SymbolEqualityComparer.Default);
         }
 
         /// <summary>
@@ -474,18 +481,28 @@ namespace Pchp.CodeAnalysis
             }
 
             // this part is expected to disappear when inlining "someSymbol != null"
-            return (object)left != (object)right && !right.Equals(left);
+            return (object)left != (object)right && !right.Equals(left, SymbolEqualityComparer.Default);
         }
 
         // By default, we do reference equality. This can be overridden.
-        public override bool Equals(object obj)
+        public virtual bool Equals(ISymbol other, SymbolEqualityComparer equalityComparer)
         {
-            return (object)this == obj;
+            return (object)other == this;
         }
 
         public bool Equals(ISymbol other)
         {
-            return this.Equals((object)other);
+            return this.Equals(other, SymbolEqualityComparer.Default);
+        }
+
+        public sealed override bool Equals(object obj)
+        {
+            if (ReferenceEquals(this, obj))
+            {
+                return true;
+            }
+
+            return obj is ISymbol other && this.Equals(other, SymbolEqualityComparer.Default);
         }
 
         // By default, we do reference equality. This can be overridden.
@@ -580,23 +597,7 @@ namespace Pchp.CodeAnalysis
         /// </summary>
         public virtual string GetDocumentationCommentId()
         {
-            throw new NotImplementedException();
-
-            //// NOTE: we're using a try-finally here because there's a test that specifically
-            //// triggers an exception here to confirm that some symbols don't have documentation
-            //// comment IDs.  We don't care about "leaks" in such cases, but we don't want spew
-            //// in the test output.
-            //var pool = PooledStringBuilder.GetInstance();
-            //try
-            //{
-            //    StringBuilder builder = pool.Builder;
-            //    DocumentationCommentIDVisitor.Instance.Visit(this, builder);
-            //    return builder.Length == 0 ? null : builder.ToString();
-            //}
-            //finally
-            //{
-            //    pool.Free();
-            //}
+            return DocumentationComments.CommentIdResolver.GetId(this);
         }
 
         /// <summary>
@@ -611,7 +612,7 @@ namespace Pchp.CodeAnalysis
             bool expandIncludes = false,
             CancellationToken cancellationToken = default(CancellationToken))
         {
-            return "";
+            return string.Empty;
         }
 
         internal string GetDebuggerDisplay()
@@ -625,8 +626,7 @@ namespace Pchp.CodeAnalysis
             {
                 var compilation = this.DeclaringCompilation;
                 Debug.Assert(compilation != null);
-                throw new NotImplementedException();
-                //compilation.DeclarationDiagnostics.AddRange(diagnostics);
+                compilation.DeclarationDiagnostics.AddRange(diagnostics);
             }
         }
 
@@ -958,6 +958,20 @@ namespace Pchp.CodeAnalysis
             //return SymbolDisplay.ToMinimalDisplayParts(this, semanticModel, position, format);
         }
 
+        #region Nullability
+
+        internal virtual byte? GetNullableContextValue()
+        {
+            return GetLocalNullableContextValue() ?? ContainingSymbol?.GetNullableContextValue();
+        }
+
+        internal virtual byte? GetLocalNullableContextValue()
+        {
+            return null;
+        }
+
+        #endregion
+
         #region ISymbol Members
 
         SymbolKind ISymbol.Kind
@@ -1175,6 +1189,26 @@ namespace Pchp.CodeAnalysis
                 return this.OriginalDefinition;
             }
         }
+
+        #endregion
+
+        #region ISymbolInternal
+
+        bool ISymbolInternal.Equals(ISymbolInternal other, TypeCompareKind compareKind) => this.Equals((object)other);
+
+        ISymbol ISymbolInternal.GetISymbol() => this;
+
+        Compilation ISymbolInternal.DeclaringCompilation => this.DeclaringCompilation;
+
+        ISymbolInternal ISymbolInternal.ContainingSymbol => this.ContainingSymbol;
+
+        IAssemblySymbolInternal ISymbolInternal.ContainingAssembly => this.ContainingAssembly;
+
+        IModuleSymbolInternal ISymbolInternal.ContainingModule => this.ContainingModule;
+
+        INamedTypeSymbolInternal ISymbolInternal.ContainingType => this.ContainingType;
+
+        INamespaceSymbolInternal ISymbolInternal.ContainingNamespace => this.ContainingNamespace;
 
         #endregion
     }

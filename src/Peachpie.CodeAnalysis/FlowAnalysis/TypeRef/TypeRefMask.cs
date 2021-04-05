@@ -48,7 +48,14 @@ namespace Pchp.CodeAnalysis.FlowAnalysis
         [Flags]
         private enum MaskFlags : ulong
         {
+            /// <summary>
+            /// Denotates a value that might be referenced.
+            /// </summary>
             IsRef = (ulong)1 << (BitsCount - 1),
+
+            /// <summary>
+            /// Denotates a type that might include its subtypes as well.
+            /// </summary>
             IncludesSubclasses = (ulong)1 << (BitsCount - 2),
 
             /// <summary>
@@ -68,6 +75,11 @@ namespace Pchp.CodeAnalysis.FlowAnalysis
         private ulong _mask;
 
         /// <summary>
+        /// Gets the type mask flags part only.
+        /// </summary>
+        public ulong Flags => _mask & FlagsMask;
+
+        /// <summary>
         /// Gets value indicating whether the type represents an any type.
         /// </summary>
         public bool IsAnyType { get { return (_mask & AnyTypeMask) == AnyTypeMask; } }
@@ -76,7 +88,12 @@ namespace Pchp.CodeAnalysis.FlowAnalysis
         /// Gets value indicating whether the type information is not initialized.
         /// </summary>
         /// <remarks>Also represents <c>void</c> type.</remarks>
-        public bool IsUninitialized { get { return _mask == (ulong)0; } }
+        public bool IsUninitialized => IsDefault;
+
+        /// <summary>
+        /// Gets value indicating whether the type information is not initialized.
+        /// </summary>
+        public bool IsDefault => _mask == 0;
 
         /// <summary>
         /// Gets value indicating whether the type represents <c>void</c>.
@@ -84,11 +101,14 @@ namespace Pchp.CodeAnalysis.FlowAnalysis
         public bool IsVoid { get { return (_mask & ~(ulong)(MaskFlags.Mask)) == 0; } }
 
         /// <summary>
-        /// Gets or sets value indicating whether the type represents an alias.
+        /// Gets or sets value indicating whether the type might represent an alias.
         /// </summary>
         public bool IsRef
         {
-            get { return (_mask & (ulong)MaskFlags.IsRef) != 0; }
+            get
+            {
+                return (_mask & (ulong)MaskFlags.IsRef) != 0;
+            }
             set
             {
                 if (value) SetIsRef();
@@ -102,9 +122,24 @@ namespace Pchp.CodeAnalysis.FlowAnalysis
         public TypeRefMask WithRefFlag => _mask | (ulong)MaskFlags.IsRef;
 
         /// <summary>
+        /// Gets copy of this type mask without the reference flag.
+        /// </summary>
+        public TypeRefMask WithoutRefFlag => _mask & ~(ulong)MaskFlags.IsRef;
+
+        /// <summary>
         /// Gets copy of this type mask with the including subclasses flag.
         /// </summary>
-        public TypeRefMask WithIncludesSubclasses => _mask | (ulong)MaskFlags.IncludesSubclasses;
+        public TypeRefMask WithSubclasses => _mask | (ulong)MaskFlags.IncludesSubclasses;
+
+        /// <summary>
+        /// Gets copy of this type mask with the including subclasses flag.
+        /// </summary>
+        public TypeRefMask WithoutSubclasses => _mask & ~(ulong)MaskFlags.IncludesSubclasses;
+
+        /// <summary>
+        /// Gets bits corresponding to types only, excluding flags.
+        /// </summary>
+        public TypeRefMask TypesMask => _mask & ~FlagsMask; // remove flags
 
         /// <summary>
         /// Gets value indicating whether given type mask represents a type including its subclasses.
@@ -126,7 +161,7 @@ namespace Pchp.CodeAnalysis.FlowAnalysis
         {
             get
             {
-                var mask = _mask & ~FlagsMask;    // remove flags
+                var mask = TypesMask;    // remove flags
                 return mask != 0 && (mask & (mask - 1)) == 0;
             }
         }
@@ -199,6 +234,13 @@ namespace Pchp.CodeAnalysis.FlowAnalysis
             {
                 _mask &= ~(ulong)MaskFlags.IsRef;
             }
+        }
+
+        public TypeRefMask WithIsRef(bool isref)
+        {
+            return isref
+                ? (_mask | (ulong)MaskFlags.IsRef)
+                : (_mask & ~(ulong)MaskFlags.IsRef);
         }
 
         /// <summary>
@@ -320,7 +362,7 @@ namespace Pchp.CodeAnalysis.FlowAnalysis
             return new TypeRefMask(a.Mask | b);
         }
 
-        public static TypeRefMask Or (TypeRefMask a, TypeRefMask b)
+        public static TypeRefMask Or(TypeRefMask a, TypeRefMask b)
         {
             return a | b;
         }

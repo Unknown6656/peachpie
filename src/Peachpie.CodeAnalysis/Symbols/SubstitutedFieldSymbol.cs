@@ -5,20 +5,61 @@ using Microsoft.CodeAnalysis.Text;
 using Roslyn.Utilities;
 using System.Globalization;
 using Microsoft.CodeAnalysis;
+using System.Diagnostics;
+using Pchp.CodeAnalysis.CodeGen;
 
 namespace Pchp.CodeAnalysis.Symbols
 {
-    internal sealed class SubstitutedFieldSymbol : FieldSymbol
+    internal sealed class SubstitutedFieldSymbol : FieldSymbol, IPhpPropertySymbol
     {
+        #region IPhpPropertySymbol
+
+        PhpPropertyKind IPhpPropertySymbol.FieldKind => ((IPhpPropertySymbol)OriginalDefinition).FieldKind;
+
+        TypeSymbol IPhpPropertySymbol.ContainingStaticsHolder
+        {
+            get
+            {
+                if (_containingType.IsStaticsContainer())
+                {
+                    return _containingType;
+                }
+
+                if (PhpFieldSymbolExtension.IsInStaticsHolder(_originalDefinition))
+                {
+                    return _containingType.TryGetStaticsHolder();
+                }
+
+                return null;
+            }
+        }
+
+        bool IPhpPropertySymbol.RequiresContext => ((IPhpPropertySymbol)OriginalDefinition).RequiresContext;
+
+        TypeSymbol IPhpPropertySymbol.DeclaringType => throw new NotImplementedException();
+
+        void IPhpPropertySymbol.EmitInit(CodeGenerator cg) { throw new NotSupportedException(); }
+
+        public override bool HasNotNull => OriginalDefinition.HasNotNull;
+
+        #endregion
+
         NamedTypeSymbol _containingType;
         readonly FieldSymbol _originalDefinition;
+        readonly object _token;
 
         private TypeSymbol _lazyType;
 
         internal SubstitutedFieldSymbol(NamedTypeSymbol containingType, FieldSymbol substitutedFrom)
+            : this(containingType, substitutedFrom, containingType)
+        {
+        }
+
+        internal SubstitutedFieldSymbol(NamedTypeSymbol containingType, FieldSymbol substitutedFrom, object token)
         {
             _containingType = containingType;
             _originalDefinition = substitutedFrom.OriginalDefinition as FieldSymbol;
+            _token = token ?? _containingType;
         }
 
         internal override TypeSymbol GetFieldType(ConsList<FieldSymbol> fieldsBeingBound)
@@ -94,6 +135,9 @@ namespace Pchp.CodeAnalysis.Symbols
 
         internal void SetContainingType(SubstitutedNamedTypeSymbol type)
         {
+            Debug.Assert(_lazyType == null);
+
+            _lazyType = null;
             _containingType = type;
         }
 
@@ -156,6 +200,8 @@ namespace Pchp.CodeAnalysis.Symbols
                 return _originalDefinition.IsReadOnly;
             }
         }
+
+        public override bool IsPhpHidden => _originalDefinition.IsPhpHidden;
 
         public override bool IsConst
         {
@@ -222,7 +268,7 @@ namespace Pchp.CodeAnalysis.Symbols
         {
             get
             {
-                return _containingType.TypeSubstitution.SubstituteCustomModifiers(_originalDefinition.Type,_originalDefinition.CustomModifiers);
+                return _containingType.TypeSubstitution.SubstituteCustomModifiers(_originalDefinition.Type, _originalDefinition.CustomModifiers);
             }
         }
 
@@ -235,20 +281,19 @@ namespace Pchp.CodeAnalysis.Symbols
         //    return (NamedTypeSymbol)_containingType.TypeSubstitution.SubstituteType(_originalDefinition.FixedImplementationType(emitModule)).Type;
         //}
 
-        public override bool Equals(object obj)
+        public override bool Equals(ISymbol other, SymbolEqualityComparer equalityComparer)
         {
-            if ((object)this == obj)
+            if ((object)this == other)
             {
                 return true;
             }
 
-            var other = obj as SubstitutedFieldSymbol;
-            return (object)other != null && _containingType == other._containingType && _originalDefinition == other._originalDefinition;
+            return other is SubstitutedFieldSymbol f && _token == f._token && SymbolEqualityComparer.Default.Equals(_originalDefinition, f._originalDefinition);
         }
 
         public override int GetHashCode()
         {
-            return Hash.Combine(_containingType, _originalDefinition.GetHashCode());
+            return Hash.Combine(_token, _originalDefinition.GetHashCode());
         }
     }
 }

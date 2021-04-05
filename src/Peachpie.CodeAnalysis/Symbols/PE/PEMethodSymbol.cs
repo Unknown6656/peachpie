@@ -1,4 +1,5 @@
 ﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.PooledObjects;
 using Roslyn.Utilities;
 using System;
 using System.Collections.Generic;
@@ -10,6 +11,10 @@ using System.Reflection.Metadata;
 using System.Text;
 using System.Threading.Tasks;
 using Microsoft.Cci;
+using System.Globalization;
+using System.Threading;
+using Pchp.CodeAnalysis.DocumentationComments;
+using Peachpie.CodeAnalysis.Symbols;
 
 namespace Pchp.CodeAnalysis.Symbols
 {
@@ -24,9 +29,9 @@ namespace Pchp.CodeAnalysis.Symbols
         {
             public readonly SignatureHeader Header;
             public readonly ImmutableArray<ParameterSymbol> Parameters;
-            public readonly ParameterSymbol ReturnParam;
+            public readonly PEParameterSymbol ReturnParam;
 
-            public SignatureData(SignatureHeader header, ImmutableArray<ParameterSymbol> parameters, ParameterSymbol returnParam)
+            public SignatureData(SignatureHeader header, ImmutableArray<ParameterSymbol> parameters, PEParameterSymbol returnParam)
             {
                 this.Header = header;
                 this.Parameters = parameters;
@@ -43,7 +48,7 @@ namespace Pchp.CodeAnalysis.Symbols
         {
             // We currently pack everything into a 32-bit int with the following layout:
             //
-            // |            m|l|k|j|i|h|g|f|e|d|c|b|aaaaa|
+            // |   sss|r|q|o|n|m|l|k|j|i|h|g|f|e|d|c|b|aaaaa|
             // 
             // a = method kind. 5 bits.
             // b = method kind populated. 1 bit.
@@ -59,7 +64,14 @@ namespace Pchp.CodeAnalysis.Symbols
             // j = isUseSiteDiagnostic populated. 1 bit
             // k = isConditional populated. 1 bit
             // l = isOverriddenOrHiddenMembers populated. 1 bit
-            // 16 bits remain for future purposes.
+            // m = isCastToFalseBit populated. 1 bit
+            // n = isCastToFalseBit. 1 bit
+            // o = isPhpHiddenBit populated. 1 bit
+            // p = isPhpHiddenBit. 1 bit
+            // q = isPhpFieldsOnlyCtorBit populated. 1 bit
+            // r = isPhpFieldsOnlyCtorBit. 1 bit
+            // s = NullableContext. 3 bits
+            // 7 bits remain for future purposes.
 
             private const int MethodKindOffset = 0;
 
@@ -76,6 +88,16 @@ namespace Pchp.CodeAnalysis.Symbols
             private const int IsUseSiteDiagnosticPopulatedBit = 0x1 << 13;
             private const int IsConditionalPopulatedBit = 0x1 << 14;
             private const int IsOverriddenOrHiddenMembersPopulatedBit = 0x1 << 15;
+
+            private const int IsCastToFalsePopulatedBit = 0x1 << 16;
+            private const int IsCastToFalseBit = 0x1 << 17;
+            private const int IsPhpHiddenPopulatedBit = 0x1 << 18;
+            private const int IsPhpHiddenBit = 0x1 << 19;
+            private const int IsPhpFieldsOnlyCtorPopulatedBit = 0x1 << 20;
+            private const int IsPhpFieldsOnlyCtorBit = 0x1 << 21;
+
+            private const int NullableContextOffset = 22;
+            private const int NullableContextMask = 0x7;
 
             private int _bits;
 
@@ -104,10 +126,37 @@ namespace Pchp.CodeAnalysis.Symbols
             public bool IsUseSiteDiagnosticPopulated => (_bits & IsUseSiteDiagnosticPopulatedBit) != 0;
             public bool IsConditionalPopulated => (_bits & IsConditionalPopulatedBit) != 0;
             public bool IsOverriddenOrHiddenMembersPopulated => (_bits & IsOverriddenOrHiddenMembersPopulatedBit) != 0;
+            public bool IsCastToFalse => (_bits & IsCastToFalseBit) != 0;
+            public bool IsCastToFalseIsPopulated => (_bits & IsCastToFalsePopulatedBit) != 0;
+            public bool IsPhpHidden => (_bits & IsPhpHiddenBit) != 0;
+            public bool IsPhpHiddenIsPopulated => (_bits & IsPhpHiddenPopulatedBit) != 0;
+            public bool IsFieldsOnlyCtor => (_bits & IsPhpFieldsOnlyCtorBit) != 0;
+            public bool IsFieldsOnlyCtorIsPopulated => (_bits & IsPhpFieldsOnlyCtorPopulatedBit) != 0;
 
             private static bool BitsAreUnsetOrSame(int bits, int mask)
             {
                 return (bits & mask) == 0 || (bits & mask) == mask;
+            }
+
+            public void InitializeIsCastToFalse(bool isCastToFalse)
+            {
+                int bitsToSet = (isCastToFalse ? IsCastToFalseBit : 0) | IsCastToFalsePopulatedBit;
+                Debug.Assert(BitsAreUnsetOrSame(_bits, bitsToSet));
+                ThreadSafeFlagOperations.Set(ref _bits, bitsToSet);
+            }
+
+            public void InitializeIsPhpHidden(bool isPhpHidden)
+            {
+                int bitsToSet = (isPhpHidden ? IsPhpHiddenBit : 0) | IsPhpHiddenPopulatedBit;
+                Debug.Assert(BitsAreUnsetOrSame(_bits, bitsToSet));
+                ThreadSafeFlagOperations.Set(ref _bits, bitsToSet);
+            }
+
+            public void InitializeIsFieldsOnlyCtor(bool isFieldsOnlyCtor)
+            {
+                int bitsToSet = (isFieldsOnlyCtor ? IsPhpFieldsOnlyCtorBit : 0) | IsPhpFieldsOnlyCtorPopulatedBit;
+                Debug.Assert(BitsAreUnsetOrSame(_bits, bitsToSet));
+                ThreadSafeFlagOperations.Set(ref _bits, bitsToSet);
             }
 
             public void InitializeIsExtensionMethod(bool isExtensionMethod)
@@ -159,21 +208,69 @@ namespace Pchp.CodeAnalysis.Symbols
             {
                 ThreadSafeFlagOperations.Set(ref _bits, IsOverriddenOrHiddenMembersPopulatedBit);
             }
+
+            public bool TryGetNullableContext(out byte? value)
+            {
+                return ((NullableContextKind)((_bits >> NullableContextOffset) & NullableContextMask)).TryGetByte(out value);
+            }
+
+            public bool SetNullableContext(byte? value)
+            {
+                return ThreadSafeFlagOperations.Set(ref _bits, (((int)value.ToNullableContextFlags() & NullableContextMask) << NullableContextOffset));
+            }
+        }
+
+        #endregion
+
+        #region UncommonFields
+
+        /// <summary>
+        /// Holds infrequently accessed fields. See <seealso cref="_uncommonFields"/> for an explanation.
+        /// </summary>
+        private sealed class UncommonFields
+        {
+            //public ParameterSymbol _lazyThisParameter;
+            //public OverriddenOrHiddenMembersResult _lazyOverriddenOrHiddenMembersResult;
+            public ImmutableArray<AttributeData> _lazyCustomAttributes;
+            //public ImmutableArray<string> _lazyConditionalAttributeSymbols;
+            public ObsoleteAttributeData _lazyObsoleteAttributeData = ObsoleteAttributeData.Uninitialized;
+            //public DiagnosticInfo _lazyUseSiteDiagnostic;
+            public KeyValuePair<CultureInfo, string> _lazyDocComment;
+        }
+
+        /// <summary>
+        /// Ensures <see cref="_uncommonFields"/> are created.
+        /// </summary>
+        UncommonFields AccessUncommonFields()
+        {
+            var retVal = _uncommonFields;
+            return retVal ?? InterlockedOperations.Initialize(ref _uncommonFields, new UncommonFields());
         }
 
         #endregion
 
         #region Fields
 
-        readonly PENamedTypeSymbol _containingType;
         readonly MethodDefinitionHandle _handle;
+        readonly string _name;
+        readonly PENamedTypeSymbol _containingType;
+        private Symbol _associatedPropertyOrEventOpt;
         private PackedFlags _packedFlags;
         private readonly ushort _flags;     // MethodAttributes
         private readonly ushort _implFlags; // MethodImplAttributes
-        private ImmutableArray<TypeParameterSymbol> _lazyTypeParameters;
         private SignatureData _lazySignature;
         private ImmutableArray<MethodSymbol> _lazyExplicitMethodImplementations;
-        readonly string _name;
+        private ImmutableArray<TypeParameterSymbol> _lazyTypeParameters;
+        
+        /// <summary>
+        /// A single field to hold optional auxiliary data.
+        /// In many scenarios it is possible to avoid allocating this, thus saving total space in <see cref="PEModuleSymbol"/>.
+        /// Even for lazily-computed values, it may be possible to avoid allocating <see cref="_uncommonFields"/> if
+        /// the computed value is a well-known "empty" value. In this case, bits in <see cref="_packedFlags"/> are used
+        /// to indicate that the lazy values have been computed and, if <see cref="_uncommonFields"/> is null, then
+        /// the "empty" value should be inferred.
+        /// </summary>
+        private UncommonFields _uncommonFields;
 
         #endregion
 
@@ -203,7 +300,7 @@ namespace Pchp.CodeAnalysis.Symbols
             {
                 if (_name == null)
                     _name = string.Empty;
-                
+
                 //InitializeUseSiteDiagnostic(new CSDiagnosticInfo(ErrorCode.ERR_BindToBogus, this));
             }
 
@@ -222,6 +319,16 @@ namespace Pchp.CodeAnalysis.Symbols
         internal override PhpCompilation DeclaringCompilation => null;
 
         public override string Name => _name;
+
+        public override string RoutineName
+        {
+            get
+            {
+                // trim leading '?#' in case of compiled conditional function decl
+                var qidx = _name.IndexOf('?');
+                return qidx < 0 ? _name : _name.Remove(qidx);
+            }
+        }
 
         private bool HasFlag(MethodAttributes flag)
         {
@@ -270,6 +377,113 @@ namespace Pchp.CodeAnalysis.Symbols
         internal override MethodImplAttributes ImplementationAttributes => (MethodImplAttributes)_implFlags;
 
         internal override bool RequiresSecurityObject => HasFlag(MethodAttributes.RequireSecObject);
+
+        public override ImmutableArray<AttributeData> GetAttributes()
+        {
+            if (!_packedFlags.IsCustomAttributesPopulated)
+            {
+                // Compute the value
+                var attributeData = default(ImmutableArray<AttributeData>);
+                var containingPEModuleSymbol = _containingType.ContainingPEModule;
+
+                // Could this possibly be an extension method?
+                bool alreadySet = _packedFlags.IsExtensionMethodIsPopulated;
+                bool checkForExtension = alreadySet
+                    ? _packedFlags.IsExtensionMethod
+                    : this.MethodKind == MethodKind.Ordinary
+                        && IsValidExtensionMethodSignature()
+                        && _containingType.MightContainExtensionMethods;
+
+                bool isExtensionMethod = false;
+                if (checkForExtension)
+                {
+                    containingPEModuleSymbol.LoadCustomAttributesFilterExtensions(_handle,
+                        ref attributeData,
+                        out isExtensionMethod);
+                }
+                else
+                {
+                    containingPEModuleSymbol.LoadCustomAttributes(_handle,
+                        ref attributeData);
+                }
+
+                if (!alreadySet)
+                {
+                    _packedFlags.InitializeIsExtensionMethod(isExtensionMethod);
+                }
+
+                // Store the result in uncommon fields only if it's not empty.
+                Debug.Assert(!attributeData.IsDefault);
+                if (!attributeData.IsEmpty)
+                {
+                    attributeData = InterlockedOperations.Initialize(ref AccessUncommonFields()._lazyCustomAttributes, attributeData);
+                }
+
+                _packedFlags.SetIsCustomAttributesPopulated();
+                return attributeData;
+            }
+            else
+            {
+                // Retrieve cached or inferred value.
+                if (_uncommonFields != null)
+                {
+                    var attributeData = _uncommonFields._lazyCustomAttributes;
+                    if (attributeData.IsDefault == false)
+                    {
+                        return attributeData;
+                    }
+                }
+                return ImmutableArray<AttributeData>.Empty;
+            }
+        }
+
+        public override ImmutableArray<AttributeData> GetReturnTypeAttributes() => Signature.ReturnParam.GetAttributes();
+
+        public override bool CastToFalse
+        {
+            get
+            {
+                if (!_packedFlags.IsCastToFalseIsPopulated)
+                {
+                    // applies only if return type is int, long, double or a reference type
+                    var returnparam = Signature.ReturnParam;
+                    _packedFlags.InitializeIsCastToFalse(AttributeHelpers.HasCastToFalse(returnparam.Handle, (PEModuleSymbol)returnparam.ContainingModule));
+                }
+                return _packedFlags.IsCastToFalse;
+            }
+        }
+
+        public override bool HasNotNull => Signature.ReturnParam.HasNotNull || CastToFalse;
+
+        public override bool IsInitFieldsOnly
+        {
+            get
+            {
+                if (!_packedFlags.IsFieldsOnlyCtorIsPopulated)
+                {
+                    var isFieldsInitOnly =
+                        MethodKind == MethodKind.Constructor &&
+                        IsStatic == false &&
+                        (DeclaredAccessibility == Accessibility.ProtectedOrInternal || DeclaredAccessibility == Accessibility.Protected) &&
+                        AttributeHelpers.HasPhpFieldsOnlyCtorAttribute(Handle, (PEModuleSymbol)ContainingModule);
+
+                    _packedFlags.InitializeIsFieldsOnlyCtor(isFieldsInitOnly);
+                }
+                return _packedFlags.IsFieldsOnlyCtor;
+            }
+        }
+
+        public override bool IsPhpHidden
+        {
+            get
+            {
+                if (!_packedFlags.IsPhpHiddenIsPopulated)
+                {
+                    _packedFlags.InitializeIsPhpHidden(AttributeHelpers.HasPhpHiddenAttribute(Handle, (PEModuleSymbol)ContainingModule));
+                }
+                return _packedFlags.IsPhpHidden;
+            }
+        }
 
         public override bool IsExtern => HasFlag(MethodAttributes.PinvokeImpl);
 
@@ -453,6 +667,23 @@ namespace Pchp.CodeAnalysis.Symbols
             }
         }
 
+        private bool IsValidExtensionMethodSignature()
+        {
+            if (!this.IsStatic)
+            {
+                return false;
+            }
+
+            var parameters = this.Parameters;
+            if (parameters.Length == 0)
+            {
+                return false;
+            }
+
+            var parameter = parameters[0];
+            return (parameter.RefKind == RefKind.None) && !parameter.IsParams;
+        }
+
         private MethodKind ComputeMethodKind()
         {
             if (this.HasSpecialName)
@@ -572,6 +803,50 @@ namespace Pchp.CodeAnalysis.Symbols
                 this.Parameters.All(p => p.RefKind == RefKind.None) && //this.ParameterRefKinds.IsDefault && // No 'ref' or 'out'
                 !this.IsParams();
 
+        /// <summary>
+        /// Associate the method with a particular property. Returns
+        /// false if the method is already associated with a property or event.
+        /// </summary>
+        internal bool SetAssociatedProperty(PEPropertySymbol propertySymbol, MethodKind methodKind)
+        {
+            Debug.Assert((methodKind == MethodKind.PropertyGet) || (methodKind == MethodKind.PropertySet));
+            return this.SetAssociatedPropertyOrEvent(propertySymbol, methodKind);
+        }
+
+        /// <summary>
+        /// Associate the method with a particular event. Returns
+        /// false if the method is already associated with a property or event.
+        /// </summary>
+        internal bool SetAssociatedEvent(/*PEEventSymbol*/Symbol eventSymbol, MethodKind methodKind)
+        {
+            Debug.Assert((methodKind == MethodKind.EventAdd) || (methodKind == MethodKind.EventRemove));
+            return this.SetAssociatedPropertyOrEvent(eventSymbol, methodKind);
+        }
+
+        private bool SetAssociatedPropertyOrEvent(Symbol propertyOrEventSymbol, MethodKind methodKind)
+        {
+            if ((object)_associatedPropertyOrEventOpt == null)
+            {
+                Debug.Assert(propertyOrEventSymbol.ContainingType == _containingType);
+
+                // No locking required since SetAssociatedProperty/SetAssociatedEvent will only be called
+                // by the thread that created the method symbol (and will be called before the method
+                // symbol is added to the containing type members and available to other threads).
+                _associatedPropertyOrEventOpt = propertyOrEventSymbol;
+
+                // NOTE: may be overwriting an existing value.
+                Debug.Assert(
+                    _packedFlags.MethodKind == default(MethodKind) ||
+                    _packedFlags.MethodKind == MethodKind.Ordinary ||
+                    _packedFlags.MethodKind == MethodKind.ExplicitInterfaceImplementation);
+
+                _packedFlags.MethodKind = methodKind;
+                return true;
+            }
+
+            return false;
+        }
+
         private SignatureData Signature => _lazySignature ?? LoadSignature();
 
         public override CallingConvention CallingConvention => (CallingConvention)Signature.Header.RawValue;
@@ -618,9 +893,6 @@ namespace Pchp.CodeAnalysis.Symbols
             {
                 @params = ImmutableArray<ParameterSymbol>.Empty;
             }
-
-            // paramInfo[0] contains information about return "parameter"
-            Debug.Assert(!paramInfo[0].IsByRef);
 
             //// Dynamify object type if necessary
             //paramInfo[0].Type = paramInfo[0].Type.AsDynamicIfNoPia(_containingType);
@@ -692,11 +964,15 @@ namespace Pchp.CodeAnalysis.Symbols
             }
         }
 
+        public override ISymbol AssociatedSymbol => _associatedPropertyOrEventOpt;
+
         public override bool ReturnsVoid => this.ReturnType.SpecialType == SpecialType.System_Void;
 
         public override ImmutableArray<ParameterSymbol> Parameters => Signature.Parameters;
 
         public override int ParameterCount => Signature.Parameters.Length;
+
+        public override RefKind RefKind => Signature.ReturnParam.RefKind;
 
         public override TypeSymbol ReturnType => Signature.ReturnParam.Type;
         internal ParameterSymbol ReturnTypeParameter => Signature.ReturnParam;
@@ -707,33 +983,58 @@ namespace Pchp.CodeAnalysis.Symbols
         {
             get
             {
-                //if (!_packedFlags.IsObsoleteAttributePopulated)
-                //{
-                //    var result = ObsoleteAttributeHelpers.GetObsoleteDataFromMetadata(_handle, (PEModuleSymbol)ContainingModule);
-                //    if (result != null)
-                //    {
-                //        result = InterlockedOperations.Initialize(ref AccessUncommonFields()._lazyObsoleteAttributeData, result, ObsoleteAttributeData.Uninitialized);
-                //    }
+                if (!_packedFlags.IsObsoleteAttributePopulated)
+                {
+                    var result = ObsoleteAttributeHelpers.GetObsoleteDataFromMetadata(_handle, (PEModuleSymbol)ContainingModule, ignoreByRefLikeMarker: false);
+                    if (result != null)
+                    {
+                        result = InterlockedOperations.Initialize(ref AccessUncommonFields()._lazyObsoleteAttributeData, result, ObsoleteAttributeData.Uninitialized);
+                    }
 
-                //    _packedFlags.SetIsObsoleteAttributePopulated();
-                //    return result;
-                //}
+                    _packedFlags.SetIsObsoleteAttributePopulated();
+                    return result;
+                }
 
-                //var uncommonFields = _uncommonFields;
-                //if (uncommonFields == null)
-                //{
-                //    return null;
-                //}
-                //else
-                //{
-                //    var result = uncommonFields._lazyObsoleteAttributeData;
-                //    return ReferenceEquals(result, ObsoleteAttributeData.Uninitialized)
-                //        ? InterlockedOperations.Initialize(ref uncommonFields._lazyObsoleteAttributeData, null, ObsoleteAttributeData.Uninitialized)
-                //        : result;
-                //}
-
-                return null;
+                var uncommonFields = _uncommonFields;
+                if (uncommonFields == null)
+                {
+                    return null;
+                }
+                else
+                {
+                    var result = uncommonFields._lazyObsoleteAttributeData;
+                    return ReferenceEquals(result, ObsoleteAttributeData.Uninitialized)
+                        ? InterlockedOperations.Initialize(ref uncommonFields._lazyObsoleteAttributeData, null, ObsoleteAttributeData.Uninitialized)
+                        : result;
+                }
             }
         }
+
+        public override string GetDocumentationCommentXml(CultureInfo preferredCulture = null, bool expandIncludes = false, CancellationToken cancellationToken = default)
+        {
+            return PEDocumentationCommentUtils.GetDocumentationComment(this, _containingType.ContainingPEModule, preferredCulture, cancellationToken, ref AccessUncommonFields()._lazyDocComment);
+        }
+
+        #region Nullability
+
+        internal override byte? GetNullableContextValue()
+        {
+            byte? value;
+            if (!_packedFlags.TryGetNullableContext(out value))
+            {
+                value = _containingType.ContainingPEModule.Module.HasNullableContextAttribute(_handle, out byte arg) ?
+                    arg :
+                    _containingType.GetNullableContextValue();
+                _packedFlags.SetNullableContext(value);
+            }
+            return value;
+        }
+
+        internal override byte? GetLocalNullableContextValue()
+        {
+            throw ExceptionUtilities.Unreachable;
+        }
+
+        #endregion
     }
 }

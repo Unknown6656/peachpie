@@ -1,4 +1,5 @@
 ﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.PooledObjects;
 using Roslyn.Utilities;
 using System;
 using System.Collections.Generic;
@@ -24,7 +25,6 @@ namespace Pchp.CodeAnalysis.Symbols
         private readonly TypeMap _inputMap;
         private readonly MethodSymbol _constructedFrom;
 
-        private TypeSymbol _lazyReturnType;
         private ImmutableArray<ParameterSymbol> _lazyParameters;
         private TypeMap _lazyMap;
         private ImmutableArray<TypeParameterSymbol> _lazyTypeParameters;
@@ -452,18 +452,21 @@ namespace Pchp.CodeAnalysis.Symbols
             }
         }
 
+        public override RefKind RefKind => originalDefinition.RefKind;
+
+        public override bool CastToFalse => originalDefinition.CastToFalse;
+
+        public override bool HasNotNull => originalDefinition.HasNotNull;
+
+        public override bool IsInitFieldsOnly => originalDefinition.IsInitFieldsOnly;
+
+        public override bool IsPhpHidden => originalDefinition.IsPhpHidden;
+
         public sealed override TypeSymbol ReturnType
         {
             get
             {
-                var returnType = _lazyReturnType;
-                if (returnType != null)
-                {
-                    return returnType;
-                }
-
-                returnType = Map.SubstituteType(originalDefinition.ReturnType).Type;
-                return Interlocked.CompareExchange(ref _lazyReturnType, returnType, null) ?? returnType;
+                return Map.SubstituteType(originalDefinition.ReturnType).Type;
             }
         }
 
@@ -484,9 +487,17 @@ namespace Pchp.CodeAnalysis.Symbols
         {
             get
             {
+                if (!_lazyParameters.IsDefault && _lazyParameters.Length != originalDefinition.ParameterCount)
+                {
+                    // parameters has changed during analysis,
+                    // reset this as well
+                    // IMPORTANT: we must not change it when emit started already
+                    _lazyParameters = default;
+                }
+
                 if (_lazyParameters.IsDefault)
                 {
-                    ImmutableInterlocked.InterlockedCompareExchange(ref _lazyParameters, SubstituteParameters(), default(ImmutableArray<ParameterSymbol>));
+                    ImmutableInterlocked.InterlockedCompareExchange(ref _lazyParameters, SubstituteParameters(), default);
                 }
 
                 return _lazyParameters;
@@ -618,7 +629,7 @@ namespace Pchp.CodeAnalysis.Symbols
             return code;
         }
 
-        public override bool Equals(object obj)
+        public override bool Equals(ISymbol obj, SymbolEqualityComparer equalityComparer)
         {
             if ((object)this == obj) return true;
 

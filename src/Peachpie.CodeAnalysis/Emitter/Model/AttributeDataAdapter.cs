@@ -2,6 +2,7 @@
 using System.Diagnostics;
 using Microsoft.CodeAnalysis.CodeGen;
 using Microsoft.CodeAnalysis.Emit;
+using Microsoft.CodeAnalysis.PooledObjects;
 using Cci = Microsoft.Cci;
 using Microsoft.CodeAnalysis;
 using Pchp.CodeAnalysis.Emit;
@@ -27,7 +28,7 @@ namespace Pchp.CodeAnalysis.Symbols
             return builder.ToImmutableAndFree();
         }
 
-        Cci.IMethodReference Cci.ICustomAttribute.Constructor(EmitContext context)
+        Cci.IMethodReference Cci.ICustomAttribute.Constructor(EmitContext context, bool reportDiagnostics)
         {
             PEModuleBuilder moduleBeingBuilt = (PEModuleBuilder)context.Module;
             return (Cci.IMethodReference)moduleBeingBuilt.Translate(this.AttributeConstructor, /*context.SyntaxNodeOpt, */context.Diagnostics, false);
@@ -100,25 +101,24 @@ namespace Pchp.CodeAnalysis.Symbols
         {
             Debug.Assert(!argument.Values.IsDefault);
             var values = argument.Values;
-            var arrayType = (IArrayTypeSymbol)argument.Type; //  Emit.PEModuleBuilder.Translate((ArrayTypeSymbol)argument.Type);
+            var arrayType = Emit.PEModuleBuilder.Translate((ArrayTypeSymbol)argument.Type);
 
-            throw new System.NotImplementedException();
-            //if (values.Length == 0)
-            //{
-            //    return new MetadataCreateArray(arrayType,
-            //                                   arrayType.GetElementType(context),
-            //                                   ImmutableArray<Cci.IMetadataExpression>.Empty);
-            //}
+            if (values.Length == 0)
+            {
+                return new MetadataCreateArray(arrayType,
+                                               arrayType.GetElementType(context),
+                                               ImmutableArray<Cci.IMetadataExpression>.Empty);
+            }
 
-            //var metadataExprs = new Cci.IMetadataExpression[values.Length];
-            //for (int i = 0; i < values.Length; i++)
-            //{
-            //    metadataExprs[i] = CreateMetadataExpression(values[i], context);
-            //}
+            var metadataExprs = new Cci.IMetadataExpression[values.Length];
+            for (int i = 0; i < values.Length; i++)
+            {
+                metadataExprs[i] = CreateMetadataExpression(values[i], context);
+            }
 
-            //return new MetadataCreateArray(arrayType,
-            //                               arrayType.GetElementType(context),
-            //                               metadataExprs.AsImmutableOrNull());
+            return new MetadataCreateArray(arrayType,
+                                           arrayType.GetElementType(context),
+                                           metadataExprs.AsImmutableOrNull());
         }
 
         private static MetadataTypeOf CreateType(TypedConstant argument, EmitContext context)

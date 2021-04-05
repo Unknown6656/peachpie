@@ -14,6 +14,14 @@ namespace Pchp.CodeAnalysis.Symbols
             return method.ParameterCount != 0 && method.Parameters[method.ParameterCount - 1].IsParams;
         }
 
+        public static bool IsErrorMethodOrNull(this MethodSymbol method) => method == null || method is IErrorMethodSymbol;
+
+        public static bool IsValidMethod(this MethodSymbol method) => method != null && !(method is IErrorMethodSymbol);
+
+        public static bool IsMissingMethod(this MethodSymbol method) =>
+            (method == null) ||
+            (method is IErrorMethodSymbol errm && errm.ErrorKind == ErrorMethodKind.Missing);
+
         public static TypeSymbol[] ParametersType(this MethodSymbol method)
         {
             return method.Parameters.Select(p => p.Type).ToArray();

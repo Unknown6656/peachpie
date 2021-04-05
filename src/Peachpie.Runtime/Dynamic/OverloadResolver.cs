@@ -8,91 +8,103 @@ using System.Linq.Expressions;
 using System.Reflection;
 using System.Text;
 using System.Threading.Tasks;
+using Pchp.Core.Reflection;
 
 namespace Pchp.Core.Dynamic
 {
     /// <summary>
     /// Methods for selecting best method overload from possible candidates.
     /// </summary>
+    [DebuggerNonUserCode]
     internal static class OverloadResolver
     {
         /// <summary>
-        /// Selects all method candidates.
-        /// </summary>
-        public static IEnumerable<MethodBase> SelectCandidates(this Type type)
-        {
-            return type.GetRuntimeMethods();
-        }
-
-        /// <summary>
         /// Selects only candidates of given name.
         /// </summary>
-        public static IEnumerable<MethodBase> SelectByName(this IEnumerable<MethodBase> candidates, string name)
+        public static MethodInfo[] SelectRuntimeMethods(this PhpTypeInfo tinfo, string name, Type classCtx)
         {
-            return candidates.Where(m => m.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+            var routine = (PhpMethodInfo)tinfo?.RuntimeMethods[name];
+            if (routine != null)
+            {
+                return routine.Methods;
+            }
+            else
+            {
+                if (classCtx != null && tinfo.Type.IsSubclassOf(classCtx))
+                {
+                    // {tinfo} extends {classCtx} // we might have to look for private methods on {classCtx}
+                    return SelectRuntimeMethods(classCtx.GetPhpTypeInfo(), name, null);
+                }
+
+                return Array.Empty<MethodInfo>();
+            }
+        }
+
+        public static IEnumerable<MethodInfo> SelectVisible(this MethodInfo[] methods, Type classCtx)
+        {
+            if (methods.Length == 0)
+            {
+                return methods;
+            }
+            else if (methods.Length == 1)
+            {
+                return methods[0].IsVisible(classCtx) ? methods : Array.Empty<MethodInfo>();
+            }
+            else
+            {
+                return methods.Where(m => m.IsVisible(classCtx));
+            }
         }
 
         /// <summary>
-        /// Selects only candidates visible from the current class context.
+        /// Gets non-static methods only if there are any. Otherwise returns everything.
         /// </summary>
-        public static bool IsVisible(this MethodBase m, Type classCtx)
+        public static MethodInfo[] NonStaticPreferably(this MethodInfo[] methods)
         {
-            if (m.IsPrivate)
+            if (methods.Length <= 1)
             {
-                return m.DeclaringType == classCtx;
+                // all methods are instance or static:
+                return methods;
             }
 
-            if (m.IsFamily)
+            int statics = methods.Count(m => m.IsStatic);
+            if (statics == 0 || statics == methods.Length)
             {
-                if (classCtx == null)
-                {
-                    return false;
-                }
-
-                if (m.DeclaringType == classCtx)
-                {
-                    return true;
-                }
-                else
-                {
-                    var m_type = m.DeclaringType.GetTypeInfo();
-                    var classCtx_type = classCtx.GetTypeInfo();
-
-                    return classCtx_type.IsAssignableFrom(m_type) || m_type.IsAssignableFrom(classCtx_type);
-                }
+                // all methods are instance or static:
+                return methods;
             }
-
-            //
-            return true;
+            else
+            {
+                // ignore the static methods:
+                return methods.Where(m => !m.IsStatic).ToArray();
+            }
         }
 
-        public static MethodInfo[] SelectVisible(this MethodInfo[] methods, Type classCtx)
+        public static IEnumerable<MethodBase> Construct(this IEnumerable<MethodBase> methods, Type[] typeargs)
         {
-            if (methods.Length == 1)
+            if (typeargs != null && typeargs.Length != 0)
             {
-                return methods[0].IsVisible(classCtx) ? methods : EmptyArray<MethodInfo>.Instance;
+                return methods
+                    .Where(m => m.IsGenericMethodDefinition && m.GetGenericArguments().Length == typeargs.Length)
+                    .OfType<MethodInfo>()
+                    .Select(m =>
+                    {
+                        try
+                        {
+                            return m.MakeGenericMethod(typeargs);
+                        }
+                        catch
+                        {
+                            return null;
+                        }
+                    })
+                    .WhereNotNull();
             }
-
-            var result = new List<MethodInfo>(methods.Length);
-            for (int i = 0; i < methods.Length; i++)
+            else
             {
-                if (methods[i].IsVisible(classCtx))
-                {
-                    result.Add(methods[i]);
-                }
+                // select non-generic methods
+                return methods.Where(m => m.IsGenericMethodDefinition == false);
             }
-
-            return (result.Count == methods.Length) ? methods : result.ToArray();
-        }
-
-        public static IEnumerable<MethodBase> SelectVisible(this IEnumerable<MethodBase> candidates, Type classCtx)
-        {
-            if (classCtx == null)
-            {
-                return candidates.Where(m => m.IsPublic);
-            }
-
-            return candidates.Where(m => m.IsVisible(classCtx));
         }
 
         /// <summary>
@@ -101,22 +113,6 @@ namespace Pchp.Core.Dynamic
         public static IEnumerable<MethodBase> SelectStatic(this IEnumerable<MethodBase> candidates)
         {
             return candidates.Where(m => m.IsStatic);
-        }
-
-        /// <summary>
-        /// Gets value indicating the parameter is a special late static bound parameter.
-        /// </summary>
-        static bool IsStaticBoundParameter(ParameterInfo p)
-        {
-            return p.ParameterType == typeof(Type) && p.Name == "<static>";
-        }
-
-        /// <summary>
-        /// Gets value indicating the parameter is a special local parameters parameter.
-        /// </summary>
-        static bool IsLocalsParameter(ParameterInfo p)
-        {
-            return p.ParameterType == typeof(PhpArray) && p.Name == "<locals>";
         }
     }
 }

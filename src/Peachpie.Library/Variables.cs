@@ -6,6 +6,9 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
+using Pchp.Core.Reflection;
+using System.Runtime.InteropServices;
+using static Pchp.Core.PhpExtensionAttribute;
 
 namespace Pchp.Library
 {
@@ -93,6 +96,7 @@ namespace Pchp.Library
 
     #endregion
 
+    [PhpExtension(KnownExtensionNames.Standard)]
     public static class Variables
     {
         #region Constants
@@ -180,7 +184,7 @@ namespace Pchp.Library
         /// </summary>
         /// <param name="variable">The variable which items to count.</param>
         /// <param name="mode">Whether to count recursively.</param>
-        /// <returns>The number of items in all arrays contained recursivelly in <paramref name="variable"/>.</returns>
+        /// <returns>The number of items in all arrays contained recursively in <paramref name="variable"/>.</returns>
         /// <remarks>If any item of the <paramref name="variable"/> contains infinite recursion 
         /// skips items that are repeating because of such recursion.
         /// </remarks>
@@ -191,7 +195,7 @@ namespace Pchp.Library
         /// </summary>
         /// <param name="variable">The variable which items to count.</param>
         /// <param name="mode">Whether to count recursively.</param>
-        /// <returns>The number of items in all arrays contained recursivelly in <paramref name="variable"/>.</returns>
+        /// <returns>The number of items in all arrays contained recursively in <paramref name="variable"/>.</returns>
         /// <remarks>If any item of the <paramref name="variable"/> contains infinite recursion 
         /// skips items that are repeating because of such recursion.
         /// </remarks>
@@ -206,16 +210,16 @@ namespace Pchp.Library
             {
                 // PHP array
                 return (mode == COUNT_RECURSIVE)
-                    ? variable.Array.RecursiveCount
+                    ? RecursiveCounter.CountValues(variable.Array)
                     : variable.Array.Count;
             }
             else if (variable.IsObject)
             {
                 // PHP Countable
-                var countable = variable.Object as Countable;
+                var countable = variable.Object as Spl.Countable;
                 if (countable != null)
                 {
-                    return countable.count().ToLong();
+                    return countable.count();
                 }
 
                 // CLR ICollection
@@ -232,6 +236,38 @@ namespace Pchp.Library
 
             // count not supported
             return 1;
+        }
+
+        /// <summary>
+        /// Helper visitor class that counts items and items in arrays recursively.
+        /// See <see cref="count"/> and <see cref="COUNT_RECURSIVE"/> for more details.
+        /// </summary>
+        sealed class RecursiveCounter : PhpVariableVisitor
+        {
+            /// <summary>Visited values count.</summary>
+            public int Count => _count;
+            int _count;
+
+            // recursion prevention
+            readonly HashSet<object> _visited = new HashSet<object>();
+
+            public static int CountValues(PhpArray array)
+            {
+                var counter = new RecursiveCounter();
+                counter.Accept(array);
+                return counter.Count;
+            }
+
+            public override void Accept(PhpArray obj)
+            {
+                if (_visited.Add(obj))
+                {
+                    base.Accept(obj);
+
+                    _count += obj.Count;
+                    _visited.Remove(obj);
+                }
+            }
         }
 
         #endregion
@@ -316,11 +352,14 @@ namespace Pchp.Library
                     return true;
 
                 case "string":
-                    variable = PhpValue.Create(variable.ToString(ctx));
+                    if (variable.TypeCode != PhpTypeCode.MutableString)    // already a string with possible binary data
+                    {
+                        variable = PhpValue.Create(variable.ToString(ctx));
+                    }
                     return true;
 
                 case "array":
-                    variable = PhpValue.Create(variable.AsArray());
+                    variable = PhpValue.Create(variable.ToArray());
                     return true;
 
                 case "object":
@@ -332,9 +371,8 @@ namespace Pchp.Library
                     return true;
             }
 
-            //PhpException.InvalidArgument("type", LibResources.GetString("invalid_type_name"));
-            //return false;
-            throw new ArgumentException(nameof(type));
+            PhpException.InvalidArgument(nameof(type), Resources.LibResources.invalid_type_name);
+            return false;
         }
 
         /// <summary>
@@ -342,11 +380,14 @@ namespace Pchp.Library
         /// </summary>
         /// <param name="variable">The variable.</param>
         /// <returns>The string type identifier. See PHP manual for details.</returns>
-        public static string gettype(PhpValue variable)
-        {
-            // works well on references:
-            return PhpVariable.GetTypeName(variable);
-        }
+        public static string gettype(PhpValue variable) => PhpVariable.GetTypeName(variable);
+
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="variable"></param>
+        /// <remarks>https://wiki.php.net/rfc/get_debug_type</remarks>
+        public static string get_debug_type(PhpValue variable) => PhpVariable.GetDebugType(variable);
 
         #endregion
 
@@ -357,7 +398,7 @@ namespace Pchp.Library
         /// </summary>
         /// <param name="variable">The variable.</param>
         /// <returns>Whether <paramref name="variable"/> is integer.</returns>
-        public static bool is_int(PhpValue variable) => variable.TypeCode == PhpTypeCode.Long || variable.TypeCode == PhpTypeCode.Int32;
+        public static bool is_int(PhpValue variable) => variable.IsInteger();
 
         /// <summary>
         /// Checks whether a dereferenced variable is integer.
@@ -369,7 +410,7 @@ namespace Pchp.Library
 
         /// <summary>
         /// Checks whether a dereferenced variable is long. 
-        /// TODO: Alias for is_int(). But not in Phalanger.
+        /// Alias for <see cref="is_int"/>.
         /// </summary>
         /// <param name="variable">The variable.</param>
         /// <returns>Whether <paramref name="variable"/> is long.</returns>
@@ -380,7 +421,7 @@ namespace Pchp.Library
         /// </summary>
         /// <param name="variable">The variable.</param>
         /// <returns>Whether <paramref name="variable"/> is boolean.</returns>
-        public static bool is_bool(PhpValue variable) => variable.TypeCode == PhpTypeCode.Boolean;
+        public static bool is_bool(PhpValue variable) => variable.IsBoolean();
 
         /// <summary>
         /// Checks whether a dereferenced variable is double.
@@ -395,7 +436,7 @@ namespace Pchp.Library
         /// </summary>
         /// <param name="variable">The variable.</param>
         /// <returns>Whether <paramref name="variable"/> is double.</returns>
-        public static bool is_double(PhpValue variable) => variable.TypeCode == PhpTypeCode.Double;
+        public static bool is_double(PhpValue variable) => variable.IsDouble();
 
         /// <summary>
         /// Checks whether a dereferenced variable is double.
@@ -410,22 +451,47 @@ namespace Pchp.Library
         /// </summary>
         /// <param name="variable">The variable.</param>
         /// <returns>Whether <paramref name="variable"/> is string.</returns>
-        public static bool is_string(PhpValue variable) => variable.TypeCode == PhpTypeCode.String || variable.TypeCode == PhpTypeCode.WritableString;
+        public static bool is_string(PhpValue variable)
+        {
+            switch (variable.TypeCode)
+            {
+                case PhpTypeCode.String:
+                case PhpTypeCode.MutableString:
+                    return true;
+
+                case PhpTypeCode.Alias:
+                    return is_string(variable.Alias.Value);
+
+                default:
+                    return false;
+            }
+        }
 
         /// <summary>
         /// Checks whether a dereferenced variable is an <see cref="PhpArray"/>.
         /// </summary>
         /// <param name="variable">The variable.</param>
         /// <returns>Whether <paramref name="variable"/> is <see cref="PhpArray"/>.</returns>
-        public static bool is_array(PhpValue variable) => variable.IsArray;
+        public static bool is_array(PhpValue variable)
+        {
+            switch (variable.TypeCode)
+            {
+                case PhpTypeCode.PhpArray: return true;
+                case PhpTypeCode.Alias: return is_array(variable.Alias.Value);
+                default: return false;
+            }
+        }
 
         /// <summary>
-        /// Checks whether a dereferenced variable is <see cref="Core.Reflection.DObject"/>.
+        /// Checks whether a dereferenced variable is an instance of class.
         /// </summary>
         /// <param name="variable">The variable.</param>
-        /// <returns>Whether <paramref name="variable"/> is <see cref="Core.Reflection.DObject"/>.</returns>
+        /// <returns>Whether <paramref name="variable"/> is <see cref="object"/>.</returns>
         public static bool is_object(PhpValue variable)
-            => variable.IsObject && variable.Object != null && !(variable.Object is __PHP_Incomplete_Class);
+        {
+            var obj = variable.AsObject();
+            return obj != null && !(obj is __PHP_Incomplete_Class) && !(obj is PhpResource);
+        }
 
         /// <summary>
         /// Checks whether a dereferenced variable is a valid <see cref="PhpResource"/>.
@@ -434,9 +500,8 @@ namespace Pchp.Library
         /// <returns>Whether <paramref name="variable"/> is a valid <see cref="PhpResource"/>.</returns>
         public static bool is_resource(PhpValue variable)
         {
-            //PhpResource res = variable as PhpResource;
-            //return res != null && res.IsValid;
-            throw new NotImplementedException();
+            var res = variable.AsResource();
+            return res != null && res.IsValid;
         }
 
         /// <summary>
@@ -446,16 +511,29 @@ namespace Pchp.Library
         /// <returns>Whether <paramref name="variable"/> is a <B>null</B> reference.</returns>
         public static bool is_null(PhpValue variable) => variable.IsNull;
 
+        /// <summary>
+        /// Verifies that the contents of a variable is an iterable value.
+        /// </summary>
+        public static bool is_iterable(PhpValue variable)
+        {
+            var obj = variable.Object;
+
+            return
+                obj is System.Collections.IEnumerable ||    // => PhpArray
+                obj is Traversable ||
+                (obj is PhpAlias alias && is_iterable(alias.Value));
+        }
+
         #endregion
 
-        #region is_scalar, is_numeric, is_callable, get_resource_type
+        #region is_scalar, is_numeric, is_callable, is_countable, get_resource_id
 
         /// <summary>
         /// Checks whether a dereferenced variable is a scalar.
         /// </summary>
         /// <param name="variable">The variable.</param>
         /// <returns>Whether <paramref name="variable"/> is an integer, a double, a bool or a string after dereferencing.</returns>
-        public static bool is_scalar(PhpValue variable) => PhpVariable.IsScalar(variable);
+        public static bool is_scalar(PhpValue variable) => variable.IsScalar;
 
         /// <summary>
         /// Checks whether a dereferenced variable is numeric.
@@ -467,15 +545,16 @@ namespace Pchp.Library
         {
             switch (variable.TypeCode)
             {
-                case PhpTypeCode.Int32:
                 case PhpTypeCode.Long:
                 case PhpTypeCode.Double:
                     return true;
 
                 case PhpTypeCode.String:
-                case PhpTypeCode.WritableString:
-                    PhpNumber tmp;
-                    return (variable.ToNumber(out tmp) & Core.Convert.NumberInfo.IsNumber) != 0;
+                case PhpTypeCode.MutableString:
+                    return (variable.ToNumber(out _) & (Core.Convert.NumberInfo.IsNumber | Core.Convert.NumberInfo.IsHexadecimal)) == Core.Convert.NumberInfo.IsNumber;
+
+                case PhpTypeCode.Alias:
+                    return is_numeric(variable.Alias.Value);
 
                 default:
                     return false;
@@ -485,21 +564,25 @@ namespace Pchp.Library
         /// <summary>
         /// Verifies that the contents of a variable can be called as a function.
         /// </summary>
+        /// <param name="ctx">Runtime context.</param>
         /// <param name="variable">The variable.</param>
         /// <param name="syntaxOnly">If <B>true</B>, it is only checked that has <pararef name="variable"/>
         /// a valid structure to be used as a callback. if <B>false</B>, the existence of the function (or
         /// method) is also verified.</param>
         /// <returns><B>true</B> if <paramref name="variable"/> denotes a function, <B>false</B>
         /// otherwise.</returns>
-        public static bool is_callable(PhpValue variable, bool syntaxOnly = false)
+        public static bool is_callable(Context ctx, IPhpCallable variable, bool syntaxOnly = false)
         {
-            return PhpVariable.IsValidCallback(variable.AsCallable());  // TODO: check syntaxOnly || can be bound
+            return syntaxOnly
+                ? PhpVariable.IsValidCallback(variable)
+                : PhpVariable.IsValidBoundCallback(ctx, variable);
         }
 
         /// <summary>
         /// Verifies that the contents of a variable can be called as a function.
         /// </summary>
         /// <param name="ctx">Current runtime context.</param>
+        /// <param name="callerCtx">Type of the current calling context.</param>
         /// <param name="variable">The variable.</param>
         /// <param name="syntaxOnly">If <B>true</B>, it is only checked that has <pararef name="variable"/>
         /// a valid structure to be used as a callback. if <B>false</B>, the existence of the function (or
@@ -508,10 +591,10 @@ namespace Pchp.Library
         /// <c>SomeClass::SomeMethod</c>).</param>
         /// <returns><B>true</B> if <paramref name="variable"/> denotes a function, <B>false</B>
         /// otherwise.</returns>
-        public static bool is_callable(Context ctx /*, caller*/, PhpValue variable, bool syntaxOnly, out string callableName)
+        public static bool is_callable(Context ctx, [ImportValue(ImportValueAttribute.ValueSpec.CallerClass)] RuntimeTypeHandle callerCtx, PhpValue variable, bool syntaxOnly, out string callableName)
         {
-            var callback = variable.AsCallable();
-            if (PhpVariable.IsValidCallback(callback))
+            var callback = variable.AsCallable(callerCtx);
+            if (is_callable(ctx, callback, syntaxOnly: syntaxOnly))
             {
                 callableName = callback.ToString();
                 return true;
@@ -522,28 +605,314 @@ namespace Pchp.Library
         }
 
         /// <summary>
-        /// Returns the type of a resource.
+        /// Verify that the contents of a variable is an array or an object implementing <see cref="Spl.Countable"/> or <see cref="System.Collections.ICollection"/>.
         /// </summary>
-        /// <param name="resource">The resource.</param>
-        /// <returns>The resource type name or <c>null</c> if <paramref name="resource"/> is <c>null</c>.</returns>
-        [return: CastToFalse]
-        public static string get_resource_type(PhpResource resource) => resource?.TypeName;
+        public static bool is_countable(PhpValue value)
+        {
+            if (value.Object is System.Collections.ICollection ||   // PhpArray, CLR Collection
+                value.Object is Spl.Countable)                      // SPL Countable
+            {
+                return true;
+            }
+
+            if (value.Object is PhpAlias alias)
+            {
+                return is_countable(alias.Value);
+            }
+
+            //
+            return false;
+        }
 
         #endregion
 
-        #region print_r, var_export, var_dump
+        #region compact, extract
+
+        /// <summary>
+        /// Creates array containing variables and their values.
+        /// </summary>
+        /// <param name="locals">The table of defined variables.</param>
+        /// <param name="names">Names of the variables - each chan be either 
+        /// <see cref="string"/> or <see cref="PhpArray"/>. Names are retrieved recursively from an array.</param>
+        /// <returns>The <see cref="PhpArray"/> which keys are names of variables and values are deep copies of 
+        /// their values.</returns>
+        /// <remarks>
+        /// Items in <paramref name="names"/> which are neither of type <see cref="string"/> nor <see cref="PhpArray"/> 
+        /// are ignored.</remarks>
+        /// <exception cref="PhpException"><paramref name="names"/> is a <B>null</B> reference.</exception>
+        public static PhpArray compact([ImportValue(ImportValueAttribute.ValueSpec.Locals)] PhpArray locals, params PhpValue[] names)
+        {
+            if (names == null)
+            {
+                //PhpException.ArgumentNull("names");
+                //return null;
+                throw new ArgumentNullException(nameof(names));
+            }
+
+            var result = new PhpArray(names.Length);
+
+            for (int i = 0; i < names.Length; i++)
+            {
+                string name;
+                PhpArray array;
+
+                if ((name = PhpVariable.ToStringOrNull(names[i])) != null)
+                {
+                    // if variable exists adds a copy of its current value to the result:
+                    if (locals.TryGetValue(name, out var value))
+                    {
+                        result.Add(name, value.DeepCopy());
+                    }
+                }
+                else if ((array = PhpVariable.ArrayOrNull(names[i])) != null)
+                {
+                    // visit array values recursively
+                    new CompactVisitor(locals, result).Accept(array);
+                }
+            }
+
+            //
+            return result;
+        }
+
+        /// <summary>
+        /// Recursively traverses given value (array) and copies variables by name from locals to result array.
+        /// </summary>
+        sealed class CompactVisitor : PhpVariableVisitor
+        {
+            readonly PhpArray _locals;
+            readonly PhpArray _result;
+
+            readonly HashSet<object> _visited = new HashSet<object>();
+
+            public CompactVisitor(PhpArray locals, [Out] PhpArray result)
+            {
+                _locals = locals;
+                _result = result;
+            }
+
+            void Accept(IntStringKey name)
+            {
+                // if variable exists adds a copy of its current value to the result:
+                if (_locals.TryGetValue(name, out var value))
+                {
+                    _result.Add(name, value.DeepCopy());
+                }
+            }
+
+            public override void Accept(PhpString obj)
+            {
+                Accept(new IntStringKey(obj.ToString()));
+            }
+
+            public override void Accept(string obj)
+            {
+                Accept(new IntStringKey(obj));
+            }
+
+            public override void Accept(PhpArray obj)
+            {
+                if (_visited.Add(obj))
+                {
+                    base.Accept(obj);
+
+                    // we don't have to remove obj from the set,
+                    // don't visit the same array twice
+                }
+            }
+        }
+
+        /// <summary>
+        /// Import variables into the current variables table from an array.
+        /// </summary>
+        /// <param name="ctx">Runtime context.</param>
+        /// <param name="locals">The table of defined variables.</param>
+        /// <param name="vars">The <see cref="PhpArray"/> containing names of variables and values to be assigned to them.</param>
+        /// <param name="type">The type of the extraction.</param>
+        /// <param name="prefix">The prefix (can be a <B>null</B> reference) of variables names.</param>
+        /// <returns>The number of variables actually affected by the extraction.</returns>
+        /// <exception cref="PhpException"><paramref name="type"/> is invalid.</exception>
+        /// <exception cref="PhpException"><paramref name="vars"/> is a <B>null</B> reference.</exception>
+        /// <exception cref="InvalidCastException">Some key of <paramref name="locals"/> is not type of <see cref="string"/>.</exception>
+        public static int extract(Context ctx, [ImportValue(ImportValueAttribute.ValueSpec.Locals)] PhpArray locals, PhpArray vars, ExtractType type = ExtractType.Overwrite, string prefix = null)
+        {
+            if (vars == null)
+            {
+                //PhpException.ArgumentNull("vars");
+                //return 0;
+                throw new ArgumentNullException(nameof(vars));
+            }
+
+            if (vars.Count == 0)
+            {
+                return 0;
+            }
+
+            // unfortunately, type contains flags are combined with enumeration: 
+            bool refs = (type & ExtractType.Refs) != 0;
+            type &= ExtractType.NonFlags;
+
+            //
+            //
+            //
+            int extracted_count = 0;
+            var enumerator = vars.GetFastEnumerator();
+            while (enumerator.MoveNext())
+            {
+                var name = enumerator.CurrentKey.ToString();
+                if (string.IsNullOrEmpty(name) && type != ExtractType.PrefixInvalid)
+                {
+                    continue;
+                }
+
+                switch (type)
+                {
+                    case ExtractType.Overwrite:
+
+                        // anything is overwritten:
+
+                        break;
+
+                    case ExtractType.Skip:
+
+                        // skips existing name:
+                        if (locals.ContainsKey(name)) continue;
+
+                        break;
+
+                    case ExtractType.IfExists:
+
+                        // skips nonexistent name:
+                        if (!locals.ContainsKey(name)) continue;
+
+                        break;
+
+                    case ExtractType.PrefixAll:
+
+                        // prefix anything:
+                        name = string.Concat(prefix, "_", name);
+
+                        break;
+
+                    case ExtractType.PrefixInvalid:
+
+                        // prefixes invalid, others are overwritten:
+                        if (!PhpVariable.IsValidName(name))
+                            name = string.Concat(prefix, "_", name);
+
+                        break;
+
+                    case ExtractType.PrefixSame:
+
+                        // prefixes existing, others are overwritten:
+                        if (locals.ContainsKey(name))
+                            name = string.Concat(prefix, "_", name);
+
+                        break;
+
+                    case ExtractType.PrefixIfExists:
+
+                        // prefixes existing, others are skipped:
+                        if (locals.ContainsKey(name))
+                            name = string.Concat(prefix, "_", name);
+                        else
+                            continue;
+
+                        break;
+
+                    default:
+                        throw new ArgumentException(nameof(type));
+                        //PhpException.InvalidArgument("type", LibResources.GetString("arg_invalid_value"));
+                        //return 0;
+                }
+
+                // invalid names are skipped:
+                if (PhpVariable.IsValidName(name))
+                {
+                    // write the value to locals:
+                    if (refs)
+                    {
+                        // makes a reference and writes it back (deep copy is not necessary, "no duplicate pointers" rule preserved):
+                        locals.SetItemAlias(new IntStringKey(name), enumerator.CurrentValueAliased);
+                    }
+                    else
+                    {
+                        // deep copy the value and write into locals
+                        locals.SetItemValue(new IntStringKey(name), enumerator.CurrentValue.GetValue().DeepCopy());
+                    }
+
+                    extracted_count++;
+                }
+            }
+
+            //
+            return extracted_count;
+        }
+
+        #endregion
+
+        #region print_r, var_export, var_dump, debug_zval_dump
+
+        abstract class FormatterVisitor : PhpVariableVisitor, IPhpVariableFormatter
+        {
+            readonly protected string _nl;
+
+            protected PhpString.Blob _output;
+            protected int _indent;
+
+            protected const string RECURSION = "*RECURSION*";
+
+            protected FormatterVisitor(string newline = "\n")
+            {
+                _nl = newline;
+            }
+
+            public virtual PhpString Serialize(PhpValue value)
+            {
+                _output = new PhpString.Blob();
+                _indent = 0;
+
+                //
+                Accept(value);
+
+                return new PhpString(_output);
+            }
+
+            /// <summary>
+            /// Lazily initialized set of visited objects.
+            /// </summary>
+            HashSet<object> _visited;
+
+            protected void NewLine() => _output.Append(_nl);
+
+            /// <summary>
+            /// Remembers the object was visited and gets value indicating the object was not visited before.
+            /// </summary>
+            protected bool Enter(object obj)
+            {
+                var visited = _visited;
+                if (visited == null)
+                {
+                    _visited = visited = new HashSet<object>();
+                }
+
+                return visited.Add(obj);
+            }
+
+            protected void Leave(object obj)
+            {
+                Debug.Assert(_visited != null);
+                var removed = _visited.Remove(obj);
+                Debug.Assert(removed);
+            }
+        }
 
         #region PrintFormatter (print_r)
 
-        class PrintFormatter : PhpVariableVisitor, IPhpVariableFormatter
+        class PrintFormatter : FormatterVisitor
         {
-            readonly Context _ctx;
-            readonly string _nl;
-
-            PhpString _output;
-            int _indent;
-
             const int IndentSize = 4;
+            new const string RECURSION = " " + FormatterVisitor.RECURSION;
 
             void OutputIndent()
             {
@@ -553,30 +922,16 @@ namespace Pchp.Library
                 }
             }
 
-            public PrintFormatter(Context ctx, string newline)
+            public PrintFormatter(string newline = "\n")
+                : base(newline)
             {
-                Debug.Assert(ctx != null);
-                _ctx = ctx;
-                _nl = newline;
-            }
-
-            public PhpString Serialize(PhpValue value)
-            {
-                _output = new PhpString();
-                _indent = 0;
-
-                //
-                Accept(value);
-                _output.Append(_nl);
-
-                return _output;
             }
 
             public override void Accept(bool obj) => _output.Append(obj ? "1" : string.Empty);
 
-            public override void Accept(long obj) => _output.Append(obj.ToString());
+            public override void Accept(long obj) => _output.Append(Core.Convert.ToString(obj));
 
-            public override void Accept(double obj) => _output.Append(Core.Convert.ToString(obj, _ctx));
+            public override void Accept(double obj) => _output.Append(Core.Convert.ToString(obj));
 
             public override void Accept(string obj) => _output.Append(obj);
 
@@ -587,20 +942,33 @@ namespace Pchp.Library
             public override void Accept(PhpArray obj)
             {
                 // Array
-                // (
                 _output.Append(PhpArray.PrintablePhpTypeName);
                 _output.Append(_nl);
-                OutputIndent();
-                _output.Append("(");
-                _output.Append(_nl);
 
-                _indent++;
+                if (Enter(obj))
+                {
+                    // (
+                    OutputIndent();
+                    _output.Append("(");
+                    _output.Append(_nl);
 
-                base.Accept(obj);
+                    _indent++;
 
-                _indent--;
-                OutputIndent();
-                _output.Append(")");
+                    base.Accept(obj);
+
+                    _indent--;
+                    OutputIndent();
+                    _output.Append(")");
+
+                    //
+                    Leave(obj);
+
+                    _output.Append(_nl);
+                }
+                else
+                {
+                    _output.Append(RECURSION);
+                }
             }
 
             public override void AcceptArrayItem(KeyValuePair<IntStringKey, PhpValue> entry)
@@ -613,30 +981,64 @@ namespace Pchp.Library
                 Accept(entry.Value);
                 _indent--;
 
-                if (entry.Value.IsArray)
-                {
-                    _output.Append(_nl);
-                }
-
-                _output.Append(_nl);
+                NewLine();
             }
 
             public override void AcceptObject(object obj)
             {
+                if (obj is PhpResource res)
+                {
+                    // Resource id #ID
+                    _output.Append($"Resource id #{res.Id}");
+                    NewLine();
+
+                    return;
+                }
+
+                if (obj is Delegate @delegate)
+                {
+                    // Delegate ({METHOD})
+                    _output.Append($"Delegate ({(@delegate.Method != null ? @delegate.Method.Name : PhpVariable.TypeNameNull)})");
+
+                    return;
+                }
+
                 // typename Object
-                // (
-                _output.Append(obj.GetType().FullName.Replace('.', '\\').Replace('+', '\\') + " ");
+                _output.Append(obj.GetPhpTypeInfo().Name);
+                _output.Append(" ");
                 _output.Append("Object");
-                _output.Append(_nl);
-                OutputIndent();
-                _output.Append("(");
 
-                _indent++;
+                if (Enter(obj))
+                {
+                    // (
+                    NewLine();
+                    OutputIndent();
+                    _output.Append("(");
+                    NewLine();
 
-                // TODO: object members
+                    _indent++;
 
-                _indent--;
-                _output.Append(")");
+                    // object members
+                    var flds = (obj is IPhpPrintable printable ? printable.Properties : TypeMembersUtils.EnumerateInstanceFieldsForPrint(obj)).ToList();
+                    foreach (var fld in flds)
+                    {
+                        // [name] => value
+                        AcceptArrayItem(new KeyValuePair<IntStringKey, PhpValue>(fld.Key, fld.Value));
+                    }
+
+                    _indent--;
+                    OutputIndent();
+                    _output.Append(")");
+
+                    //
+                    Leave(obj);
+
+                    NewLine();
+                }
+                else
+                {
+                    _output.Append(RECURSION);
+                }
             }
         }
 
@@ -644,14 +1046,8 @@ namespace Pchp.Library
 
         #region ExportFormatter (var_export)
 
-        class ExportFormatter : PhpVariableVisitor, IPhpVariableFormatter
+        class ExportFormatter : FormatterVisitor
         {
-            readonly Context _ctx;
-            readonly string _nl;
-
-            PhpString _output;
-            int _indent;
-
             const int IndentSize = 2;
 
             void OutputIndent()
@@ -662,54 +1058,97 @@ namespace Pchp.Library
                 }
             }
 
-            public ExportFormatter(Context ctx, string newline)
+            public ExportFormatter(string newline = "\n")
+                : base(newline)
             {
-                Debug.Assert(ctx != null);
-                _ctx = ctx;
-                _nl = newline;
-            }
-
-            public PhpString Serialize(PhpValue value)
-            {
-                _output = new PhpString();
-                _indent = 0;
-
-                //
-                Accept(value);
-                return _output;
             }
 
             public override void Accept(bool obj) => _output.Append(obj ? PhpVariable.True : PhpVariable.False);
 
-            public override void Accept(long obj) => _output.Append(obj.ToString());
+            public override void Accept(long obj) => _output.Append(Core.Convert.ToString(obj));
 
-            public override void Accept(double obj) => _output.Append(Core.Convert.ToString(obj, _ctx));
+            public override void Accept(double obj) => _output.Append(Core.Convert.ToString(obj));
 
-            public override void Accept(string obj) => _output.Append($"'{obj}'");
+            public override void Accept(string obj)
+            {
+                if (string.IsNullOrEmpty(obj))
+                {
+                    _output.Append("''");
+                }
+                else
+                {
+                    _output.Append("'");
+
+                    // `\` and `'` will be escaped
+                    int last = 0;
+                    char ch;
+                    for (int i = 0; i < obj.Length; i++)
+                    {
+                        switch (ch = obj[i])
+                        {
+                            case '\'':
+                            case '\\':
+                                _output.Append(obj.Substring(last, i - last));
+                                _output.Append(ch == '\'' ? @"\'" : @"\\");
+                                last = i + 1;
+                                break;
+                        }
+                    }
+
+                    _output.Append(obj.Substring(last));
+
+                    _output.Append("'");
+                }
+            }
 
             public override void Accept(PhpString obj)
             {
-                _output.Append("'");
-                _output.Append(obj);
-                _output.Append("'");
+                //if (obj.ContainsBinaryData)
+                //{
+                //    _output.Append("'");
+                //    _output.Append(obj);  // TODO: escape ' and \
+                //    _output.Append("'");
+                //}
+                //else
+                {
+                    Accept(obj.ToString());
+                }
             }
 
             public override void AcceptNull() => _output.Append(PhpVariable.TypeNameNull);
 
             public override void Accept(PhpArray obj)
             {
-                // array (
-                _output.Append(PhpArray.PhpTypeName);
-                _output.Append(" (");
-                _output.Append(_nl);
-                
-                _indent++;
+                if (Enter(obj))
+                {
+                    if (_indent != 0)
+                    {
+                        _output.Append(_nl);
+                        OutputIndent();
+                    }
 
-                base.Accept(obj);
+                    // array (
+                    _output.Append(PhpArray.PhpTypeName);
+                    _output.Append(" (");
+                    NewLine();
 
-                _indent--;
-                OutputIndent();
-                _output.Append(")");
+                    _indent++;
+
+                    base.Accept(obj);
+
+                    _indent--;
+                    OutputIndent();
+                    _output.Append(")");
+
+                    //
+                    Leave(obj);
+                }
+                else
+                {
+                    // NULL
+                    PhpException.Throw(PhpError.Warning, Resources.Resources.var_export_circular_reference);
+                    AcceptNull();
+                }
             }
 
             public override void AcceptArrayItem(KeyValuePair<IntStringKey, PhpValue> entry)
@@ -719,20 +1158,81 @@ namespace Pchp.Library
 
                 Accept(PhpValue.Create(entry.Key));
                 _output.Append(" => ");
-                if (entry.Value.IsArray || entry.Value.IsObject && !entry.Value.IsNull)
-                {
-                    _output.Append(_nl);
-                    OutputIndent();
-                }
                 Accept(entry.Value);
-                
+
                 _output.Append(",");
-                _output.Append(_nl);
+                NewLine();
+            }
+
+            void AcceptObjectMembers(PhpArray array)
+            {
+                // array(
+                _output.Append(PhpArray.PhpTypeName);
+                _output.Append("(");
+                NewLine();
+                _indent++;
+
+                var e = array.GetFastEnumerator();
+                while (e.MoveNext())
+                {
+                    AcceptArrayItem(new KeyValuePair<IntStringKey, PhpValue>(new IntStringKey(e.CurrentKey.ToString()), e.CurrentValue));
+                }
+
+                _indent--;
+                _output.Append(")");
             }
 
             public override void AcceptObject(object obj)
             {
-                throw new NotImplementedException();
+                if (obj is PhpResource)
+                {
+                    // NULL
+                    AcceptNull();
+                }
+                else if (Enter(obj))
+                {
+                    if (_indent != 0)
+                    {
+                        _output.Append(_nl);
+                        OutputIndent();
+                    }
+
+                    if (obj is stdClass std)
+                    {
+                        // (object) array(
+                        //   [key] => value,
+                        // )
+                        _output.Append($"({PhpVariable.TypeNameObject}) ");
+                        AcceptObjectMembers(std.GetRuntimeFields()); // array()
+                    }
+                    else
+                    {
+                        // {ClassName}::__set_state(array(
+                        //   [key] => value,
+                        // ))
+
+                        var tinfo = obj.GetPhpTypeInfo();
+                        _output.Append(tinfo.Name);
+                        _output.Append("::");
+                        _output.Append("__set_state(");
+
+                        var array = new PhpArray();
+                        foreach (var pair in TypeMembersUtils.EnumerateInstanceFieldsForExport(obj))
+                        {
+                            array[pair.Key] = pair.Value;
+                        }
+                        AcceptObjectMembers(array);
+                        _output.Append(")");
+                    }
+
+                    //
+                    Leave(obj);
+                }
+                else
+                {
+                    PhpException.Throw(PhpError.Warning, Resources.Resources.var_export_circular_reference);
+                    AcceptNull();
+                }
             }
         }
 
@@ -740,15 +1240,14 @@ namespace Pchp.Library
 
         #region DumpFormatter (var_dump)
 
-        class DumpFormatter : PhpVariableVisitor, IPhpVariableFormatter
+        class DumpFormatter : FormatterVisitor
         {
-            readonly Context _ctx;
-            readonly string _nl;
-
-            PhpString _output;
-            int _indent;
-
             const int IndentSize = 2;
+
+            /// <summary>
+            /// Enables verbose dump.
+            /// </summary>
+            bool Verbose { get; }
 
             void OutputIndent()
             {
@@ -758,23 +1257,17 @@ namespace Pchp.Library
                 }
             }
 
-            public DumpFormatter(Context ctx, string newline)
+            public DumpFormatter(string newline = "\n", bool verbose = false)
+                : base(newline)
             {
-                Debug.Assert(ctx != null);
-                _ctx = ctx;
-                _nl = newline;
+                this.Verbose = verbose;
             }
 
-            public PhpString Serialize(PhpValue value)
+            public override PhpString Serialize(PhpValue value)
             {
-                _output = new PhpString();
-                _indent = 0;
-
-                //
-                Accept(value);
+                base.Serialize(value);
                 _output.Append(_nl);
-
-                return _output;
+                return new PhpString(_output);
             }
 
             public override void Accept(bool obj)
@@ -789,15 +1282,15 @@ namespace Pchp.Library
             {
                 _output.Append(PhpVariable.TypeNameInt);
                 _output.Append("(");
-                _output.Append(obj.ToString());
+                _output.Append(Core.Convert.ToString(obj));
                 _output.Append(")");
             }
 
             public override void Accept(double obj)
             {
-                _output.Append(PhpVariable.TypeNameFloat);
+                _output.Append(PhpVariable.TypeNameDouble);
                 _output.Append("(");
-                _output.Append(Core.Convert.ToString(obj, _ctx));
+                _output.Append(Core.Convert.ToString(obj));
                 _output.Append(")");
             }
 
@@ -819,24 +1312,40 @@ namespace Pchp.Library
 
             public override void Accept(PhpAlias obj)
             {
-                _output.Append("&");
-                base.Accept(obj);
+                if (Enter(obj))
+                {
+                    _output.Append("&");
+                    base.Accept(obj);
+
+                    //
+                    Leave(obj);
+                }
+                else
+                {
+                    // *RECURSION*
+                    _output.Append(RECURSION);
+                }
             }
 
             public override void AcceptNull() => _output.Append(PhpVariable.TypeNameNull);
 
             public override void Accept(PhpArray obj)
             {
-                // array (size=COUNT)
+                // array
                 _output.Append(PhpArray.PhpTypeName);
+
+                // (size=COUNT)
+                // {
                 _output.Append($"({obj.Count}) {{");
-                _output.Append(_nl);
+                NewLine();
 
                 _indent++;
 
                 base.Accept(obj);
 
                 _indent--;
+
+                // }
                 OutputIndent();
                 _output.Append("}");
             }
@@ -848,17 +1357,68 @@ namespace Pchp.Library
 
                 OutputIndent();
 
-                _output.Append("[" + (entry.Key.IsString ? $"\"{entry.Key.String}\"" : entry.Key.Integer.ToString()) + "]");
+                _output.Append("[" + (entry.Key.IsString ? $"\"{entry.Key.String}\"" : Core.Convert.ToString(entry.Key.Integer)) + "]");
                 _output.Append("=>");
-                _output.Append(_nl);
+                NewLine();
                 OutputIndent();
                 Accept(entry.Value);
-                _output.Append(_nl);
+                NewLine();
             }
 
             public override void AcceptObject(object obj)
             {
-                throw new NotImplementedException();
+                if (obj is PhpResource res)
+                {
+                    // resource(ID) of type (TYPE)
+                    _output.Append($"resource({res.Id}) of type ({res.TypeName})");
+
+                    return;
+                }
+
+                if (obj is Delegate @delegate)
+                {
+                    // delegate(TYPE) with method ({METHOD})
+                    _output.Append($"delegate({obj.GetPhpTypeInfo().Name}) with method ({(@delegate.Method != null ? @delegate.Method.Name : PhpVariable.TypeNameNull)})");
+
+                    return;
+                }
+
+                if (Enter(obj))
+                {
+                    var flds = (obj is IPhpPrintable printable ? printable.Properties : TypeMembersUtils.EnumerateInstanceFieldsForDump(obj)).ToList();
+
+                    // Template: class NAME#ID (COUNT) {
+                    _output.Append($"class {obj.GetPhpTypeInfo().Name}#{unchecked((uint)obj.GetHashCode())} ({flds.Count}) {{");
+                    _indent++;
+
+                    // object members
+                    foreach (var fld in flds)
+                    {
+                        // [key]=>
+                        // value
+
+                        NewLine();
+                        OutputIndent();
+                        _output.Append("[" + fld.Key + "]=>");
+                        NewLine();
+                        OutputIndent();
+                        Accept(fld.Value);
+                    }
+
+                    // }
+                    _indent--;
+                    NewLine();
+                    OutputIndent();
+                    _output.Append("}");
+
+                    //
+                    Leave(obj);
+                }
+                else
+                {
+                    // *RECURSION*
+                    _output.Append(RECURSION);
+                }
             }
         }
 
@@ -878,7 +1438,7 @@ namespace Pchp.Library
         /// <returns>A string representation or <c>true</c> if <paramref name="returnString"/> is <c>false</c>.</returns>
         public static PhpValue print_r(Context ctx, PhpValue value, bool returnString = false)
         {
-            var output = (new PrintFormatter(ctx, "\n")).Serialize(value);
+            var output = new PrintFormatter().Serialize(value);
 
             if (returnString)
             {
@@ -900,10 +1460,25 @@ namespace Pchp.Library
         /// <param name="variables">Variables to be dumped.</param>
         public static void var_dump(Context ctx, params PhpValue[] variables)
         {
-            var formatter = new DumpFormatter(ctx, "\n"); // TODO: HtmlDumpFormatter
+            var formatter = new DumpFormatter(); // TODO: HtmlDumpFormatter
             for (int i = 0; i < variables.Length; i++)
             {
-                ctx.Echo(formatter.Serialize(variables[i]));
+                ctx.Echo(formatter.Serialize(variables[i].GetValue()));
+            }
+        }
+
+        /// <summary>
+        /// Dumps a more detailed string representation of value.
+        /// </summary>
+        /// <param name="ctx">Current runtime context.</param>
+        /// <param name="variables">Variables to be dumped.</param>
+        public static void debug_zval_dump(Context ctx, params PhpValue[] variables)
+        {
+            var formatter = new DumpFormatter(verbose: true);
+
+            for (int i = 0; i < variables.Length; i++)
+            {
+                ctx.Echo(formatter.Serialize(variables[i].GetValue()));
             }
         }
 
@@ -916,7 +1491,7 @@ namespace Pchp.Library
         /// <returns>A string representation or a <c>null</c> reference if <paramref name="returnString"/> is <c>false</c>.</returns>
         public static string var_export(Context ctx, PhpValue variable, bool returnString = false)
         {
-            var output = (new ExportFormatter(ctx, "\n")).Serialize(variable);
+            var output = new ExportFormatter().Serialize(variable);
 
             if (returnString)
             {
@@ -933,5 +1508,38 @@ namespace Pchp.Library
         }
 
         #endregion
+    }
+
+    [PhpExtension(KnownExtensionNames.Core)]
+    public static class VariablesCore
+    {
+        #region get_defined_vars
+
+        /// <summary>
+        /// This function returns a multidimensional array containing a list of all defined variables,
+        /// be them environment, server or user-defined variables, within the scope that get_defined_vars() is called.
+        /// </summary>
+        /// <param name="locals">The table of defined variables.</param>
+        /// <returns></returns>
+        public static PhpArray get_defined_vars([ImportValue(ImportValueAttribute.ValueSpec.Locals)] PhpArray locals) => locals.DeepCopy();
+
+        #endregion
+
+        #region get_resource_type
+
+        /// <summary>
+        /// Returns the type of a resource.
+        /// </summary>
+        /// <param name="res">The resource.</param>
+        /// <returns>The resource type name or <c>null</c> if <paramref name="res"/> is <c>null</c>.</returns>
+        public static string get_resource_type(PhpValue res) => res.AsResource()?.TypeName;
+
+        #endregion
+
+        /// <summary>
+        /// Get the resource ID for a given resource.
+        /// </summary>
+        /// <exception cref="Spl.TypeError">Argument is not a resource or <c>null</c>.</exception>
+        public static int get_resource_id(PhpResource res) => res != null ? res.Id : throw new Spl.TypeError();
     }
 }

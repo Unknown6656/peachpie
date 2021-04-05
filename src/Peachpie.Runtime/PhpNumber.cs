@@ -1,6 +1,9 @@
-﻿using System;
+﻿#nullable enable
+
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -11,22 +14,31 @@ namespace Pchp.Core
     [DebuggerDisplay("{GetDebuggerValue,nq}", Type = "{GetDebuggerType,nq}")]
     [DebuggerNonUserCode, DebuggerStepThrough]
     [StructLayout(LayoutKind.Explicit)]
-    public struct PhpNumber : IComparable<PhpNumber>, IPhpConvertible
+    public readonly struct PhpNumber : IComparable<PhpNumber>, IComparable<long>, IComparable<double>, IEquatable<PhpNumber>, IPhpConvertible
     {
+        #region nested enum: NumberType
+
+        enum NumberType
+        {
+            @long = 0,
+            @double = 1,
+        }
+
+        #endregion
+
         #region Fields
 
         /// <summary>
         /// Number type.
-        /// Valid values are <see cref="PhpTypeCode.Long"/> and <see cref="PhpTypeCode.Double"/>.
         /// </summary>
         [FieldOffset(0)]
-        PhpTypeCode _typeCode;
+        readonly NumberType _type;
 
         [FieldOffset(4)]
-        long _long;
+        readonly long _long;
 
         [FieldOffset(4)]
-        double _double;
+        readonly double _double;
 
         #endregion
 
@@ -35,12 +47,12 @@ namespace Pchp.Core
         /// <summary>
         /// Gets value indicating the number is a floating point number.
         /// </summary>
-        public bool IsDouble { get { return _typeCode == PhpTypeCode.Double; } }
+        public bool IsDouble => !IsLong;
 
         /// <summary>
         /// Gets value indicating the number is an integer.
         /// </summary>
-        public bool IsLong { get { return _typeCode == PhpTypeCode.Long; } }
+        public bool IsLong => _type == NumberType.@long;
 
         /// <summary>
         /// Gets the long field of the number.
@@ -72,16 +84,9 @@ namespace Pchp.Core
 
         #region Debug
 
-        string GetDebuggerValue { get { return IsLong ? _long.ToString() : _double.ToString(); } }
-        string GetDebuggerType { get { return IsLong ? PhpVariable.TypeNameInteger : PhpVariable.TypeNameDouble; } }
+        string GetDebuggerValue => ToString();
 
-        /// <summary>
-        /// Checks the number type code is valid.
-        /// </summary>
-        void AssertTypeCode()
-        {
-            Debug.Assert(_typeCode == PhpTypeCode.Long || _typeCode == PhpTypeCode.Double);
-        }
+        string GetDebuggerType { get { return IsLong ? PhpVariable.TypeNameInteger : PhpVariable.TypeNameDouble; } }
 
         #endregion
 
@@ -90,23 +95,24 @@ namespace Pchp.Core
         #region Equality, Comparison
 
         /// <summary>
+        /// Value equality comparison, operand must contain the same value as this.
+        /// </summary>
+        public bool Equals(PhpNumber other) => other._long == _long && other._type == _type;    // <=> tmp.Double == Double
+
+        /// <summary>
         /// Gets non strict comparison with another number.
         /// </summary>
         public int CompareTo(PhpNumber other)
         {
-            this.AssertTypeCode();
-            other.AssertTypeCode();
-
-            //
-            if (_typeCode == other._typeCode)
+            if (_type == other._type)
             {
-                return (_typeCode == PhpTypeCode.Long)
+                return (_type == NumberType.@long)
                     ? _long.CompareTo(other._long)
                     : _double.CompareTo(other._double);
             }
             else
             {
-                return (_typeCode == PhpTypeCode.Long)
+                return (_type == NumberType.@long)
                     ? ((double)_long).CompareTo(other._double)
                     : _double.CompareTo((double)other._long);
             }
@@ -125,8 +131,6 @@ namespace Pchp.Core
         /// </summary>
         public int CompareTo(long lx)
         {
-            this.AssertTypeCode();
-
             return IsLong ? _long.CompareTo(lx) : _double.CompareTo((double)lx);
         }
 
@@ -152,18 +156,22 @@ namespace Pchp.Core
 
         public static bool operator <(PhpNumber x, long ly)
         {
-            x.AssertTypeCode();
-
-            //
             return x.IsLong ? (x._long < ly) : (x._double < (double)ly);
         }
 
         public static bool operator >(PhpNumber x, long ly)
         {
-            x.AssertTypeCode();
-
-            //
             return x.IsLong ? (x._long > ly) : (x._double > (double)ly);
+        }
+
+        public static bool operator <(long lx, PhpNumber y)
+        {
+            return y.IsLong ? (lx < y._long) : ((double)lx < y._double);
+        }
+
+        public static bool operator >(long lx, PhpNumber y)
+        {
+            return y.IsLong ? (lx > y._long) : ((double)lx > y._double);
         }
 
         /// <summary>
@@ -181,19 +189,15 @@ namespace Pchp.Core
         /// </summary>
         public static bool operator ==(PhpNumber a, PhpNumber b)
         {
-            a.AssertTypeCode();
-            b.AssertTypeCode();
-
-            //
-            if (a._typeCode == b._typeCode)
+            if (a._type == b._type)
             {
-                return (a._typeCode == PhpTypeCode.Long)
+                return (a._type == NumberType.@long)
                     ? a._long == b._long
                     : a._double == b._double;
             }
             else
             {
-                return (a._typeCode == PhpTypeCode.Long)
+                return (a._type == NumberType.@long)
                     ? (double)a._long == b._double
                     : a._double == (double)b._long;
             }
@@ -218,6 +222,18 @@ namespace Pchp.Core
         /// </summary>
         public static bool operator !=(PhpNumber x, long y)
             => !(x == y);
+
+        /// <summary>
+        /// Non strict equality operator.
+        /// </summary>
+        public static bool operator ==(long lx, PhpNumber y)
+            => y.IsLong ? lx == y.Long : lx == y.Double;
+
+        /// <summary>
+        /// Non strict equality operator.
+        /// </summary>
+        public static bool operator !=(long lx, PhpNumber y)
+            => !(lx == y);
 
         /// <summary>
         /// Non strict equality operator.
@@ -266,12 +282,12 @@ namespace Pchp.Core
         /// Implements <c>+</c> operator on numbers.
         /// </summary>
         /// <param name="x">First operand.</param>
-        /// <param name="y">Second operand.</param>
+        /// <param name="dy">Second operand.</param>
         /// <returns></returns>
-        public static PhpNumber operator +(PhpNumber x, double y)
+        public static double operator +(PhpNumber x, double dy)
         {
             // at least one operand is a double:
-            return Create(Add(x, y));
+            return x.ToDouble() + dy;
         }
 
         /// <summary>
@@ -300,11 +316,11 @@ namespace Pchp.Core
         /// <param name="dx">First operand.</param>
         /// <param name="y">Second operand.</param>
         /// <returns></returns>
-        public static PhpNumber operator +(double dx, PhpNumber y)
+        public static double operator +(double dx, PhpNumber y)
         {
             // at least one operand is a double:
             // DOUBLE + DOUBLE|LONG
-            return Create(Add(dx, y));
+            return dx + y.ToDouble();
         }
 
         /// <summary>
@@ -325,6 +341,34 @@ namespace Pchp.Core
             // LONG + LONG
             Debug.Assert(y.IsLong);
             return Add(lx, y._long);
+        }
+
+        /// <summary>
+        /// Implements <c>+</c> operator on numbers.
+        /// </summary>
+        public static PhpNumber operator +(PhpValue x, PhpNumber y)
+        {
+            var x_info = x.ToNumber(out var x_number);
+            if ((x_info & (Convert.NumberInfo.Unconvertible | Convert.NumberInfo.IsPhpArray)) != 0)
+            {
+                throw new NotImplementedException();
+            }
+
+            return x_number + y;
+        }
+
+        /// <summary>
+        /// Implements <c>+</c> operator on numbers.
+        /// </summary>
+        public static PhpNumber operator +(PhpNumber x, PhpValue y)
+        {
+            var y_info = y.ToNumber(out var y_number);
+            if ((y_info & (Convert.NumberInfo.Unconvertible | Convert.NumberInfo.IsPhpArray)) != 0)
+            {
+                throw new NotImplementedException();    // TODO: PhpException; return 0
+            }
+
+            return x + y_number;
         }
 
         /// <summary>
@@ -363,27 +407,9 @@ namespace Pchp.Core
         /// <summary>
         /// Implements <c>+</c> operator on numbers.
         /// </summary>
-        public static double Add(PhpNumber x, double y)
-        {
-            return x.ToDouble() + y;
-        }
-
-        /// <summary>
-        /// Implements <c>+</c> operator on numbers.
-        /// </summary>
-        public static double Add(double x, PhpNumber y)
-        {
-            return x + y.ToDouble();
-        }
-
-        /// <summary>
-        /// Implements <c>+</c> operator on numbers.
-        /// </summary>
         public static PhpNumber Add(PhpValue x, long y)
         {
-            PhpNumber x_number;
-
-            var x_info = x.ToNumber(out x_number);
+            var x_info = x.ToNumber(out var x_number);
             if ((x_info & (Convert.NumberInfo.Unconvertible | Convert.NumberInfo.IsPhpArray)) != 0)
             {
                 throw new ArgumentException();
@@ -397,9 +423,7 @@ namespace Pchp.Core
         /// </summary>
         public static double Add(PhpValue x, double y)
         {
-            PhpNumber x_number;
-
-            var x_info = x.ToNumber(out x_number);
+            var x_info = x.ToNumber(out var x_number);
             if ((x_info & (Convert.NumberInfo.Unconvertible | Convert.NumberInfo.IsPhpArray)) != 0)
             {
                 throw new ArgumentException();
@@ -411,42 +435,9 @@ namespace Pchp.Core
         /// <summary>
         /// Implements <c>+</c> operator on numbers.
         /// </summary>
-        public static PhpNumber Add(PhpValue x, PhpNumber y)
-        {
-            PhpNumber x_number;
-
-            var x_info = x.ToNumber(out x_number);
-            if ((x_info & (Convert.NumberInfo.Unconvertible | Convert.NumberInfo.IsPhpArray)) != 0)
-            {
-                throw new NotImplementedException();
-            }
-
-            return x_number + y;
-        }
-
-        /// <summary>
-        /// Implements <c>+</c> operator on numbers.
-        /// </summary>
-        public static PhpNumber Add(PhpNumber x, PhpValue y)
-        {
-            PhpNumber y_number;
-
-            var y_info = x.ToNumber(out y_number);
-            if ((y_info & (Convert.NumberInfo.Unconvertible | Convert.NumberInfo.IsPhpArray)) != 0)
-            {
-                throw new NotImplementedException();    // TODO: PhpException; return 0
-            }
-
-            return x + y_number;
-        }
-
-        /// <summary>
-        /// Implements <c>+</c> operator on numbers.
-        /// </summary>
         public static PhpNumber Add(long x, PhpValue y)
         {
-            PhpNumber number;
-            if ((y.ToNumber(out number) & (Convert.NumberInfo.Unconvertible | Convert.NumberInfo.IsPhpArray)) != 0)
+            if ((y.ToNumber(out var number) & (Convert.NumberInfo.Unconvertible | Convert.NumberInfo.IsPhpArray)) != 0)
             {
                 //PhpException.UnsupportedOperandTypes();
                 //return 0.0;
@@ -462,8 +453,7 @@ namespace Pchp.Core
         /// </summary>
         public static double Add(double x, PhpValue y)
         {
-            PhpNumber number;
-            if ((y.ToNumber(out number) & (Convert.NumberInfo.Unconvertible | Convert.NumberInfo.IsPhpArray)) != 0)
+            if ((y.ToNumber(out var number) & (Convert.NumberInfo.Unconvertible | Convert.NumberInfo.IsPhpArray)) != 0)
             {
                 //PhpException.UnsupportedOperandTypes();
                 //return 0.0;
@@ -479,16 +469,14 @@ namespace Pchp.Core
         /// </summary>
         public static PhpValue Add(PhpValue x, PhpValue y)
         {
-            PhpNumber xnumber, ynumber;
-
             // converts x and y to numbers:
-            if (((x.ToNumber(out xnumber) | y.ToNumber(out ynumber)) & (Convert.NumberInfo.IsPhpArray | Convert.NumberInfo.Unconvertible)) != 0)
+            if (((x.ToNumber(out var xnumber) | y.ToNumber(out var ynumber)) & (Convert.NumberInfo.IsPhpArray | Convert.NumberInfo.Unconvertible)) != 0)
             {
                 return AddNonNumbers(ref x, ref y);
             }
 
             //
-            return PhpValue.Create(xnumber + ynumber);
+            return (xnumber + ynumber).ToPhpValue();
         }
 
         /// <summary>
@@ -496,9 +484,44 @@ namespace Pchp.Core
         /// </summary>
         static PhpValue AddNonNumbers(ref PhpValue x, ref PhpValue y)
         {
-            if (x.IsArray && y.IsArray)
+            var arr_x = x.AsArray();
+            var arr_y = y.AsArray();
+
+            if (arr_x != null && arr_y != null)
             {
-                return PhpValue.Create((PhpArray)x.Array.DeepCopy().Unite(y.Array));
+                return (PhpValue)PhpArray.Union(arr_x, arr_y);
+            }
+
+            //PhpException.UnsupportedOperandTypes();
+            //return 0;
+            throw new ArgumentException();  // TODO: ErrCode & return 0
+        }
+
+        /// <summary>
+        /// Implements <c>+</c> operator on values.
+        /// </summary>
+        public static PhpArray Add(PhpValue x, PhpArray y)
+        {
+            var arr = x.AsArray();  // array or &array
+            if (arr != null)
+            {
+                return PhpArray.Union(arr, y);
+            }
+
+            //PhpException.UnsupportedOperandTypes();
+            //return 0;
+            throw new ArgumentException();  // TODO: ErrCode & return 0
+        }
+
+        /// <summary>
+        /// Implements <c>+</c> operator on values.
+        /// </summary>
+        public static PhpArray Add(PhpArray x, PhpValue y)
+        {
+            var arr = y.AsArray();  // array or &array
+            if (arr != null)
+            {
+                return PhpArray.Union(x, arr);
             }
 
             //PhpException.UnsupportedOperandTypes();
@@ -636,6 +659,23 @@ namespace Pchp.Core
         /// <summary>
         /// Subtract operator.
         /// </summary>
+        public static double Sub(double dx, PhpValue y)
+        {
+            PhpNumber y_number;
+
+            var y_info = y.ToNumber(out y_number);
+            if ((y_info & (Convert.NumberInfo.Unconvertible | Convert.NumberInfo.IsPhpArray)) != 0)
+            {
+                throw new ArgumentException();  // return 0
+            }
+
+            //
+            return dx - y_number.ToDouble();
+        }
+
+        /// <summary>
+        /// Subtract operator.
+        /// </summary>
         public static PhpNumber Sub(PhpValue x, PhpNumber y)
         {
             PhpNumber x_number;
@@ -648,6 +688,22 @@ namespace Pchp.Core
 
             //
             return x_number - y;
+        }
+
+        /// <summary>
+        /// Implements <c>-</c> operator on numbers.
+        /// </summary>
+        public static PhpNumber Sub(PhpNumber x, PhpValue y)
+        {
+            PhpNumber y_number;
+
+            var y_info = y.ToNumber(out y_number);
+            if ((y_info & (Convert.NumberInfo.Unconvertible | Convert.NumberInfo.IsPhpArray)) != 0)
+            {
+                throw new NotImplementedException();    // TODO: PhpException; return 0
+            }
+
+            return x - y_number;
         }
 
         /// <summary>
@@ -700,8 +756,6 @@ namespace Pchp.Core
         /// </summary>
         public static PhpNumber operator -(PhpNumber x)
         {
-            x.AssertTypeCode();
-
             if (x.IsDouble)
             {
                 return Create(-x._double);
@@ -721,9 +775,6 @@ namespace Pchp.Core
         /// </summary>
         public static PhpNumber operator /(PhpNumber x, PhpNumber y)
         {
-            x.AssertTypeCode();
-            y.AssertTypeCode();
-
             if (x.IsDouble) // double / number
                 return Create(x._double / y.ToDouble());
 
@@ -741,10 +792,59 @@ namespace Pchp.Core
         /// <summary>
         /// Divide operator.
         /// </summary>
+        public static PhpNumber operator /(PhpNumber x, long ly)
+        {
+            if (x.IsDouble) // double / long
+            {
+                return Create(x._double / (double)ly);
+            }
+
+            // long / long
+            var r = x._long % ly;
+
+            return (r == 0)
+                ? Create(x._long / ly)
+                : Create((double)x._long / (double)ly);
+        }
+
+        /// <summary>
+        /// Divide operator.
+        /// </summary>
+        public static double operator /(PhpNumber x, double dy)
+        {
+            return x.ToDouble() / dy;
+        }
+
+        /// <summary>
+        /// Divide operator.
+        /// </summary>
+        public static PhpNumber operator /(PhpNumber x, PhpValue y)
+        {
+            PhpNumber ynumber;
+            if ((y.ToNumber(out ynumber) & (Convert.NumberInfo.Unconvertible | Convert.NumberInfo.IsPhpArray)) != 0)
+            {
+                //PhpException.UnsupportedOperandTypes();
+                //return 0.0;
+                throw new ArgumentException();
+            }
+
+            //
+            return x / ynumber;
+        }
+
+        /// <summary>
+        /// Divide operator.
+        /// </summary>
+        public static double operator /(double dx, PhpNumber y)
+        {
+            return dx / y.ToDouble();
+        }
+
+        /// <summary>
+        /// Divide operator.
+        /// </summary>
         public static PhpNumber operator /(long lx, PhpNumber y)
         {
-            y.AssertTypeCode();
-
             if (y.IsDouble) // long / double
                 return Create((double)lx / y._double);
 
@@ -799,9 +899,6 @@ namespace Pchp.Core
         /// </summary>
         public static PhpNumber operator *(PhpNumber x, PhpNumber y)
         {
-            x.AssertTypeCode();
-            y.AssertTypeCode();
-
             // double * number
             if (x.IsDouble)
                 return Create(x._double * y.ToDouble());
@@ -819,8 +916,6 @@ namespace Pchp.Core
         /// </summary>
         public static PhpNumber operator *(long lx, PhpNumber y)
         {
-            y.AssertTypeCode();
-
             // long * double
             if (y.IsDouble)
                 return Create((double)lx * y._double);
@@ -834,8 +929,6 @@ namespace Pchp.Core
         /// </summary>
         public static PhpNumber operator *(PhpNumber x, long ly)
         {
-            x.AssertTypeCode();
-
             // double * number
             if (x.IsDouble)
                 return Create(x._double * (double)ly);
@@ -1102,6 +1195,93 @@ namespace Pchp.Core
 
         #endregion
 
+        #region Mod
+
+        /// <summary>Gets remainder of two numbers.</summary>
+        public static long Mod(PhpValue x, PhpValue y)
+        {
+            PhpNumber nx, ny;
+            var info = x.ToNumber(out nx) | y.ToNumber(out ny);
+            if ((info & Convert.NumberInfo.IsPhpArray) != 0)
+            {
+                throw new ArgumentException();
+                // TODO: Err UnsupportedOperandTypes
+            }
+
+            return Mod(nx.ToLong(), ny.ToLong());
+        }
+
+        /// <summary>Gets remainder of two numbers.</summary>
+        public static long Mod(PhpValue x, long ly)
+        {
+            PhpNumber nx;
+            var info = x.ToNumber(out nx);
+            if ((info & Convert.NumberInfo.IsPhpArray) != 0)
+            {
+                throw new ArgumentException();
+                // TODO: Err UnsupportedOperandTypes
+            }
+
+            return Mod(nx.ToLong(), ly);
+        }
+
+        /// <summary>Gets remainder of two numbers.</summary>
+        public static long Mod(long lx, PhpValue y)
+        {
+            PhpNumber ny;
+            var info = y.ToNumber(out ny);
+            if ((info & Convert.NumberInfo.IsPhpArray) != 0)
+            {
+                throw new ArgumentException();
+                // TODO: Err UnsupportedOperandTypes
+            }
+
+            return Mod(lx, ny.ToLong());
+        }
+
+        /// <summary>Gets remainder of two numbers.</summary>
+        public static long Mod(long lx, long ly)
+        {
+            // TODO: Err check ly != 0 to report PHP warning
+
+            return lx % ly;
+        }
+
+        #endregion
+
+        #region Conversion
+
+        /// <summary>
+        /// Converts given number to <see cref="long"/>.
+        /// </summary>
+        public static implicit operator long(PhpNumber value) => value.ToLong();
+
+        /// <summary>
+        /// Converts given number to <see cref="bool"/>.
+        /// </summary>
+        public static implicit operator bool(PhpNumber value) => value.ToBoolean();
+
+        /// <summary>
+        /// Converts given number to <see cref="double"/>.
+        /// </summary>
+        public static implicit operator double(PhpNumber value) => value.ToDouble();
+
+        public static implicit operator PhpNumber(long value) => Create(value);
+
+        public static implicit operator PhpNumber(double value) => Create(value);
+
+        #endregion
+
+        #region Operators
+
+        public bool IsEmpty() => /*this == default;*/ _long == 0L; // => _double == 0
+
+        public stdClass ToObject() => new stdClass(ToPhpValue());
+
+        public PhpValue ToPhpValue() => IsLong ? PhpValue.Create(_long) : PhpValue.Create(_double);
+
+        #endregion
+
         #endregion
 
         #region Construction
@@ -1109,17 +1289,17 @@ namespace Pchp.Core
         /// <summary>
         /// Integer zero number.
         /// </summary>
-        public readonly static PhpNumber Default = Create(0L);
+        public readonly static PhpNumber Default = new PhpNumber(0L);
 
         private PhpNumber(long value) : this()
         {
-            _typeCode = PhpTypeCode.Long;
+            _type = NumberType.@long;
             _long = value;
         }
 
         private PhpNumber(double value) : this()
         {
-            _typeCode = PhpTypeCode.Double;
+            _type = NumberType.@double;
             _double = value;
         }
 
@@ -1131,63 +1311,34 @@ namespace Pchp.Core
 
         #region Object
 
-        public override int GetHashCode()
-        {
-            return unchecked((int)_long);
-        }
+        public override int GetHashCode() => unchecked((int)_long);
 
-        public override bool Equals(object obj)
-        {
-            PhpNumber tmp;
-            return obj is PhpNumber
-                && (tmp = (PhpNumber)obj).TypeCode == TypeCode
-                && tmp._long == _long;    // <=> tmp.Double == Double
-        }
+        public override bool Equals(object obj) => obj is PhpNumber num && Equals(num);
 
         #endregion
 
         #region IPhpConvertible
 
-        /// <summary>
-        /// The PHP value type.
-        /// </summary>
-        public PhpTypeCode TypeCode
-        {
-            get
-            {
-                AssertTypeCode();
-                return _typeCode;
-            }
-        }
-
         public double ToDouble()
         {
-            AssertTypeCode();
-
-            return (_typeCode == PhpTypeCode.Long) ? (double)_long : _double;
+            return IsDouble ? _double : (double)_long;
         }
 
         public long ToLong()
         {
-            AssertTypeCode();
-
-            return (_typeCode == PhpTypeCode.Long) ? _long : (long)_double;
+            return IsLong ? _long : (long)_double;
         }
 
         public bool ToBoolean()
         {
-            AssertTypeCode();
-
             return _long != 0L;  // (Double == 0.0 <=> Long == 0L)
         }
 
         public Convert.NumberInfo ToNumber(out PhpNumber number)
         {
-            AssertTypeCode();
-
             number = this;
 
-            return (_typeCode == PhpTypeCode.Long)
+            return IsLong
                 ? Convert.NumberInfo.IsNumber | Convert.NumberInfo.LongInteger
                 : Convert.NumberInfo.IsNumber | Convert.NumberInfo.Double;
         }
@@ -1195,22 +1346,14 @@ namespace Pchp.Core
         /// <summary>
         /// Gets string representation of the number.
         /// </summary>
-        public string ToString(Context ctx)
+        public override string ToString()
         {
-            AssertTypeCode();
-
-            return IsLong ? _long.ToString() : Convert.ToString(_double, ctx);
+            return IsLong ? Convert.ToString(_long) : Convert.ToString(_double);
         }
 
-        public string ToStringOrThrow(Context ctx)
-        {
-            return ToString(ctx);
-        }
+        public object ToClass() => ToObject();
 
-        public object ToClass()
-        {
-            return new stdClass(PhpValue.Create(this));
-        }
+        public PhpArray ToArray() => PhpArray.New(ToPhpValue());
 
         #endregion
     }

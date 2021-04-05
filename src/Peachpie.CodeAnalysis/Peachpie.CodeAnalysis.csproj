@@ -1,0 +1,58 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFrameworks>netstandard2.0</TargetFrameworks>
+    <NoWarn>$(NoWarn);1591</NoWarn>
+    <AssemblyName>Peachpie.CodeAnalysis</AssemblyName>
+    <PackageId>Peachpie.CodeAnalysis</PackageId>
+    <PackageTags>php;peachpie;dotnet;compiler</PackageTags>
+    <GeneratePackageOnBuild>True</GeneratePackageOnBuild>
+    <Description>Peachpie PHP language compiler platform.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Devsense.Php.Parser" Version="$(ParserVersion)" />
+    <PackageReference Include="Devsense.Php.Phar" Version="1.0.15" />
+    <PackageReference Include="Peachpie.Microsoft.CodeAnalysis" Version="3.7.1" />
+    <PackageReference Include="Peachpie.Library.RegularExpressions" Version="$(PeachpieLibraryRegularExpressionsVersion)" />
+    <PackageReference Include="System.Collections.Immutable" Version="1.5.0" />
+    <PackageReference Include="System.Memory" Version="4.5.4" />
+    <PackageReference Include="System.Reflection.Metadata" Version="1.6.0" />
+    <PackageReference Include="Peachpie.Compiler.Diagnostics" Version="1.0.10" Condition=" '$(Configuration)' == 'Release' " />
+    
+    <!-- Prevent package downgrades -->
+    <PackageReference Include="System.Collections" Version="4.3.0" />  
+    <PackageReference Include="System.Diagnostics.Debug" Version="4.3.0" />  
+    <PackageReference Include="System.Resources.ResourceManager" Version="4.3.0" />  
+    <PackageReference Include="System.Runtime.Extensions" Version="4.3.0" />  
+    <PackageReference Include="System.Runtime.Handles" Version="4.3.0" />
+    <PackageReference Include="System.Runtime.InteropServices" Version="4.3.0" />
+    <PackageReference Include="System.Text.Encoding.Extensions" Version="4.3.0" />  
+    <PackageReference Include="System.Threading" Version="4.3.0" />  
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Update="Errors\ErrorStrings.Designer.cs">
+      <DesignTime>True</DesignTime>
+      <AutoGen>True</AutoGen>
+      <DependentUpon>ErrorStrings.resx</DependentUpon>
+    </Compile>
+    <Compile Update="PhpResources.Designer.cs">
+      <DesignTime>True</DesignTime>
+      <AutoGen>False</AutoGen>
+      <DependentUpon>PhpResources.resx</DependentUpon>
+    </Compile>
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Update="Errors\ErrorStrings.resx">
+      <Generator>ResXFileCodeGenerator</Generator>
+      <LastGenOutput>ErrorStrings.Designer.cs</LastGenOutput>
+    </EmbeddedResource>
+    <EmbeddedResource Update="PhpResources.resx">
+      <Generator>ResXFileCodeGenerator</Generator>
+      <LastGenOutput>PhpResources.Designer.cs</LastGenOutput>
+    </EmbeddedResource>
+  </ItemGroup>
+
+</Project>

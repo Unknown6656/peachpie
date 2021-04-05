@@ -3,6 +3,7 @@ using Microsoft.CodeAnalysis.CodeGen;
 using Pchp.CodeAnalysis.CodeGen;
 using Pchp.CodeAnalysis.Semantics.Model;
 using Pchp.CodeAnalysis.Symbols;
+using Peachpie.CodeAnalysis.Utilities;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -15,6 +16,16 @@ namespace Pchp.CodeAnalysis.Emit
 {
     partial class PEModuleBuilder
     {
+        static string EntryPointScriptName(MethodSymbol method)
+        {
+            if (method is SourceRoutineSymbol routine)
+            {
+                return routine.ContainingFile.RelativeFilePath;
+            }
+
+            return string.Empty;
+        }
+
         /// <summary>
         /// Create real CIL entry point, where it calls given method.
         /// </summary>
@@ -30,11 +41,8 @@ namespace Pchp.CodeAnalysis.Emit
                 {
                     var types = this.Compilation.CoreTypes;
                     var methods = this.Compilation.CoreMethods;
+                    var conversions = this.Compilation.Conversions;
                     var args_place = new ParamPlace(realmethod.Parameters[0]);
-
-                    // AddScriptReference<Script>()
-                    var AddScriptReferenceMethod = (MethodSymbol)methods.Context.AddScriptReference_TScript.Symbol.Construct(this.ScriptType);
-                    il.EmitCall(this, diagnostic, ILOpCode.Call, AddScriptReferenceMethod);
 
                     // int exitcode = 0;
                     var exitcode_loc = il.LocalSlotManager.AllocateSlot(types.Int32.Symbol, LocalSlotConstraints.None);
@@ -43,19 +51,52 @@ namespace Pchp.CodeAnalysis.Emit
 
                     // create Context
                     var ctx_loc = il.LocalSlotManager.AllocateSlot(types.Context.Symbol, LocalSlotConstraints.None);
+                    var ex_loc = il.LocalSlotManager.AllocateSlot(types.Exception.Symbol, LocalSlotConstraints.None);
+                    var onUnhandledException_method = types.Context.Symbol.LookupMember<MethodSymbol>("OnUnhandledException");
 
-                    // ctx_loc = Context.Create***(args)
-                    args_place.EmitLoad(il);
-                    MethodSymbol create_method = (_compilation.Options.OutputKind == OutputKind.ConsoleApplication)
-                        ? _compilation.CoreTypes.Context.Symbol.LookupMember<MethodSymbol>("CreateConsole")
-                        : null;
-                    Debug.Assert(create_method != null);
-                    il.EmitOpCode(ILOpCode.Call, +1);
-                    il.EmitToken(create_method, null, diagnostic);
+                    var cg = new CodeGenerator(il,
+                        moduleBuilder: this,
+                        diagnostics: diagnostic,
+                        optimizations: PhpOptimizationLevel.Release,
+                        emittingPdb: false,
+                        container: realmethod.ContainingType,
+                        contextPlace: new LocalPlace(ctx_loc),
+                        thisPlace: null);
+
+                    if (_compilation.Options.OutputKind == OutputKind.ConsoleApplication)
+                    {
+                        // CreateConsole(string mainscript, params string[] args)
+                        var create_method = types.Context.Symbol.LookupMember<MethodSymbol>("CreateConsole", m =>
+                        {
+                            return
+                                m.ParameterCount == 2 &&
+                                m.Parameters[0].Type == types.String &&     // string mainscript
+                                m.Parameters[1].Type == args_place.Type;    // params string[] args
+                        });
+                        Debug.Assert(create_method != null);
+                        
+                        il.EmitStringConstant(EntryPointScriptName(method));    // mainscript
+                        args_place.EmitLoad(il);                                // args
+
+                        il.EmitOpCode(ILOpCode.Call, +2);
+                        il.EmitToken(create_method, null, diagnostic);
+                    }
+                    else
+                    {
+                        // CreateEmpty(args)
+                        MethodSymbol create_method = types.Context.Symbol.LookupMember<MethodSymbol>("CreateEmpty");
+                        Debug.Assert(create_method != null);
+                        Debug.Assert(create_method.ParameterCount == 1);
+                        Debug.Assert(create_method.Parameters[0].Type == args_place.Type);
+                        args_place.EmitLoad(il);    // args
+                        il.EmitOpCode(ILOpCode.Call, +1);
+                        il.EmitToken(create_method, null, diagnostic);
+                    }
+
                     il.EmitLocalStore(ctx_loc);
 
                     // Template:
-                    // try { Main(...); } catch (ScriptDiedException) { } finally { ctx.Dispose; }
+                    // try { Main(...); } catch (ScriptDiedException) { } catch (Exception) { ... } finally { ctx.Dispose(); }
 
                     il.OpenLocalScope(ScopeType.TryCatchFinally);   // try { try ... } finally {}
                     il.OpenLocalScope(ScopeType.Try);
@@ -68,49 +109,85 @@ namespace Pchp.CodeAnalysis.Emit
                             // emit .call method;
                             if (method.HasThis)
                             {
-                                throw new NotImplementedException();    // TODO: create instance of ContainingType
+                                // TODO: error code for this
+                                throw new NotImplementedException("Startup method must be static.");    // CONSIDER: create instance of ContainingType
                             }
 
                             // params
                             foreach (var p in method.Parameters)
                             {
-                                if (p.Type == types.Context && p.Name == SpecialParameterSymbol.ContextName)
+                                switch (p.Name)
                                 {
-                                    // <ctx>
-                                    il.EmitLocalLoad(ctx_loc);
-                                }
-                                else if (p.Type == types.PhpArray && p.Name == SpecialParameterSymbol.LocalsName)
-                                {
-                                    // <ctx>.Globals
-                                    il.EmitLocalLoad(ctx_loc);
-                                    il.EmitCall(this, diagnostic, ILOpCode.Call, methods.Context.Globals.Getter)
-                                        .Expect(p.Type);
-                                }
-                                else if (p.Type == types.Object && p.Name == SpecialParameterSymbol.ThisName)
-                                {
-                                    // null
-                                    il.EmitNullConstant();
-                                }
-                                else
-                                {
-                                    throw new NotImplementedException();    // TODO: default parameter
+                                    case SpecialParameterSymbol.ContextName:
+                                        // <ctx>
+                                        il.EmitLocalLoad(ctx_loc);
+                                        break;
+                                    case SpecialParameterSymbol.LocalsName:
+                                        // <ctx>.Globals
+                                        il.EmitLocalLoad(ctx_loc);
+                                        il.EmitCall(this, diagnostic, ILOpCode.Call, methods.Context.Globals.Getter)
+                                            .Expect(p.Type);
+                                        break;
+                                    case SpecialParameterSymbol.ThisName:
+                                        // null
+                                        il.EmitNullConstant();
+                                        break;
+                                    case SpecialParameterSymbol.SelfName:
+                                        // default(RuntimeTypeHandle)
+                                        var runtimetypehandle_loc = il.LocalSlotManager.AllocateSlot(types.RuntimeTypeHandle.Symbol, LocalSlotConstraints.None);
+                                        il.EmitValueDefault(this, diagnostic, runtimetypehandle_loc);
+                                        il.LocalSlotManager.FreeSlot(runtimetypehandle_loc);
+                                        break;
+                                    default:
+                                        throw new ArgumentException($"Startup method's argument '${p.Name}' of type '{p.Type.Name}' cannot be fullfilled.");
                                 }
                             }
 
-                            if (il.EmitCall(this, diagnostic, ILOpCode.Call, method).SpecialType != SpecialType.System_Void)
-                                il.EmitOpCode(ILOpCode.Pop);
+                            var rettype = il.EmitCall(this, diagnostic, ILOpCode.Call, method);
+                            if (rettype.SpecialType != SpecialType.System_Void)
+                            {
+                                cg.EmitConvert(rettype, 0, types.Int32, Semantics.ConversionKind.Explicit);
+                                il.EmitLocalStore(exitcode_loc);
+                            }
                         }
                         il.CloseLocalScope();   // /Try
 
                         il.AdjustStack(1); // Account for exception on the stack.
-                        il.OpenLocalScope(ScopeType.Catch, Compilation.CoreTypes.ScriptDiedException.Symbol);
+                        il.OpenLocalScope(ScopeType.Catch, types.ScriptDiedException.Symbol);
                         {
                             // exitcode = <exception>.ProcessStatus(ctx)
                             il.EmitLocalLoad(ctx_loc);
-                            il.EmitCall(this, diagnostic, ILOpCode.Callvirt, Compilation.CoreTypes.ScriptDiedException.Symbol.LookupMember<MethodSymbol>("ProcessStatus"));
+                            il.EmitCall(this, diagnostic, ILOpCode.Callvirt, types.ScriptDiedException.Symbol.LookupMember<MethodSymbol>("ProcessStatus"));
                             il.EmitLocalStore(exitcode_loc);
                         }
                         il.CloseLocalScope();   // /Catch
+                        if (onUnhandledException_method != null) // only if runtime defines the method (backward compat.)
+                        {
+                            il.OpenLocalScope(ScopeType.Catch, types.Exception.Symbol);
+                            {
+                                // <ex_loc> = <stack>
+                                il.EmitLocalStore(ex_loc);
+
+                                // <ctx_loc>.OnUnhandledException( <ex_loc> ) : bool
+                                il.EmitLocalLoad(ctx_loc);
+                                il.EmitLocalLoad(ex_loc);
+                                il.EmitCall(this, diagnostic, ILOpCode.Callvirt, onUnhandledException_method)
+                                    .Expect(SpecialType.System_Boolean);
+
+                                // if ( !<bool> )
+                                // {
+                                var lbl_end = new object();
+                                il.EmitBranch(ILOpCode.Brtrue, lbl_end);
+
+                                // rethrow <ex_loc>;
+                                il.EmitLocalLoad(ex_loc);
+                                il.EmitThrow(true);
+
+                                // }
+                                il.MarkLabel(lbl_end);
+                            }
+                            il.CloseLocalScope();   // /Catch
+                        }
                         il.CloseLocalScope();   // /TryCatch
                     }
                     il.CloseLocalScope();   // /Try
@@ -159,130 +236,26 @@ namespace Pchp.CodeAnalysis.Emit
             var body = MethodGenerator.GenerateMethodBody(this, wrapper,
                 (il) =>
                 {
-                    // TODO: CodeGenerator.EmitConvertToPhpValue(cg.EmitCall(main))
-
-                    // load arguments
-                    foreach (var p in main.Parameters)
+                    using (var cg = new CodeGenerator(il, this, diagnostic, this.Compilation.Options.OptimizationLevel, false, main.ContainingType, null, null))
                     {
-                        il.EmitLoadArgumentOpcode(p.Ordinal);
+                        // load arguments
+                        foreach (var p in main.Parameters)
+                        {
+                            il.EmitLoadArgumentOpcode(p.Ordinal);
+                        }
+
+                        // call <Main>
+                        var result = il.EmitCall(this, diagnostic, ILOpCode.Call, main);
+
+                        // convert result to PhpValue
+                        cg.EmitConvertToPhpValue(result, 0);
+
+                        il.EmitRet(false);
                     }
-
-                    // call <Main>
-                    var result = il.EmitCall(this, diagnostic, ILOpCode.Call, main);
-
-                    // convert result to PhpValue
-                    CodeGenerator.EmitConvertToPhpValue(result, 0, il, this, diagnostic);
-                    il.EmitRet(false);
                 },
                 null, diagnostic, false);
 
             SetMethodBody(wrapper, body);
-        }
-
-        /// <summary>
-        /// Emit body of enumeration of referenced functions.
-        /// </summary>
-        internal void CreateEnumerateReferencedFunctions(DiagnosticBag diagnostic)
-        {
-            var method = this.ScriptType.EnumerateReferencedFunctionsSymbol;
-            var functions = GlobalSemantics.ResolveExtensionContainers(this.Compilation)
-                .SelectMany(c => c.GetMembers().OfType<MethodSymbol>())
-                .Where(GlobalSemantics.IsFunction);
-
-            // void (Action<string, RuntimeMethodHandle> callback)
-            var body = MethodGenerator.GenerateMethodBody(this, method,
-                (il) =>
-                {
-                    var action_string_method = method.Parameters[0].Type;
-                    Debug.Assert(action_string_method.Name == "Action");
-                    var invoke = action_string_method.DelegateInvokeMethod();
-                    Debug.Assert(invoke != null);
-
-                    foreach (var f in functions)
-                    {
-                        // callback.Invoke(f.Name, f)
-                        il.EmitLoadArgumentOpcode(0);
-                        il.EmitStringConstant(f.Name);
-                        il.EmitLoadToken(this, diagnostic, f, null);
-                        il.EmitCall(this, diagnostic, ILOpCode.Callvirt, invoke);
-                    }
-
-                    //
-                    il.EmitRet(true);
-                },
-                null, diagnostic, false);
-
-            SetMethodBody(method, body);
-        }
-
-        /// <summary>
-        /// Emit body of enumeration of scripts Main function.
-        /// </summary>
-        internal void CreateEnumerateScriptsSymbol(DiagnosticBag diagnostic)
-        {
-            var method = this.ScriptType.EnumerateScriptsSymbol;
-            var files = this.Compilation.SourceSymbolTables.GetFiles();
-
-            // void (Action<string, RuntimeMethodHandle> callback)
-            var body = MethodGenerator.GenerateMethodBody(this, method,
-                (il) =>
-                {
-                    var action_string_method = method.Parameters[0].Type;
-                    Debug.Assert(action_string_method.Name == "Action");
-                    var invoke = action_string_method.DelegateInvokeMethod();
-                    Debug.Assert(invoke != null);
-
-                    foreach (var f in files)
-                    {
-                        // callback.Invoke(f.Name, f)
-                        il.EmitLoadArgumentOpcode(0);
-                        il.EmitStringConstant(f.RelativeFilePath);
-                        il.EmitLoadToken(this, diagnostic, f.MainMethod, null);
-                        il.EmitCall(this, diagnostic, ILOpCode.Callvirt, invoke);
-                    }
-
-                    //
-                    il.EmitRet(true);
-                },
-                null, diagnostic, false);
-
-            SetMethodBody(method, body);
-        }
-
-        /// <summary>
-        /// Emit body of enumeration of app-wide global constants.
-        /// </summary>
-        internal void CreateEnumerateConstantsSymbol(DiagnosticBag diagnostic)
-        {
-            var method = this.ScriptType.EnumerateConstantsSymbol;
-            // var consts = this.Compilation. ...
-
-            // void (Action<string, RuntimeMethodHandle> callback)
-            var body = MethodGenerator.GenerateMethodBody(this, method,
-                (il) =>
-                {
-                    var action_string_method = method.Parameters[0].Type;
-                    Debug.Assert(action_string_method.Name == "Action");
-                    var invoke = action_string_method.DelegateInvokeMethod();
-                    Debug.Assert(invoke != null);
-
-                    // TODO:
-                    //foreach (var c in consts)
-                    //{
-                    //    // callback.Invoke(c.Name, c.Value, c.IgnoreCase)
-                    //    il.EmitLoadArgumentOpcode(0);
-                    //    il.EmitStringConstant(c.Name);
-                    //    // c.Value
-                    //    // c.IgnoreCase
-                    //    il.EmitCall(this, diagnostic, ILOpCode.Callvirt, invoke);
-                    //}
-
-                    //
-                    il.EmitRet(true);
-                },
-                null, diagnostic, false);
-
-            SetMethodBody(method, body);
         }
     }
 }

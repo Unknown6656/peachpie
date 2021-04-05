@@ -5,6 +5,8 @@ using System.Text;
 using System.Threading.Tasks;
 using Microsoft.CodeAnalysis;
 using System.IO;
+using System.Reflection;
+using System.Diagnostics;
 
 namespace Pchp.CodeAnalysis.CommandLine
 {
@@ -15,29 +17,52 @@ namespace Pchp.CodeAnalysis.CommandLine
                  PhpCommandLineParser.Default,
                  Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ResponseFileName),
                  CreateArgs(args),
-                 AppDomain.CurrentDomain.BaseDirectory,
-                 Directory.GetCurrentDirectory(),
-                 System.Runtime.InteropServices.RuntimeEnvironment.GetRuntimeDirectory(),
-                 Environment.GetEnvironmentVariable("LIB") + @";C:\Windows\Microsoft.NET\assembly\GAC_MSIL",
+                 new BuildPaths(
+                     clientDir: AppDomain.CurrentDomain.BaseDirectory,
+                     workingDir: System.IO.Directory.GetCurrentDirectory(),
+                     sdkDir: System.Runtime.InteropServices.RuntimeEnvironment.GetRuntimeDirectory(),
+                     tempDir: null),
+                 ReferenceDirectories,
                  analyzerLoader)
         {
             
         }
 
+        static string ReferenceDirectories
+        {
+            get
+            {
+                var libs = Environment.GetEnvironmentVariable("LIB");
+                var gac = Environment.ExpandEnvironmentVariables(@"%windir%\Microsoft.NET\assembly\GAC_MSIL");
+                return libs + ";" + gac;
+            }
+        }
+
         static string[] CreateArgs(string[] args)
         {
-            var basedir = AppDomain.CurrentDomain.BaseDirectory;
-            var list = new List<string>()
+            // implicit references
+            var assemblies = new List<Assembly>()
             {
-                "/r:" + @"C:\WINDOWS\Microsoft.Net\assembly\GAC_MSIL\System.Runtime\v4.0_4.0.0.0__b03f5f7f11d50a3a\System.Runtime.dll",
-                "/r:" + @"C:\WINDOWS\Microsoft.Net\assembly\GAC_MSIL\System.Core\v4.0_4.0.0.0__b77a5c561934e089\System.Core.dll",
-                "/r:" + Path.Combine(basedir, "Peachpie.Runtime.dll"),
-                "/r:" + Path.Combine(basedir, "Peachpie.Library.dll")
+                typeof(object).Assembly,            // mscorlib (or System.Runtime)
+                typeof(HashSet<>).Assembly,         // System.Core
+                typeof(System.ComponentModel.EditorBrowsableAttribute).Assembly, // System.Runtime
+                typeof(Core.Context).Assembly,      // Peachpie.Runtime
+                typeof(Library.Strings).Assembly,   // Peachpie.Library
+                typeof(Peachpie.Library.XmlDom.DOMDocument).Assembly,   // Peachpie.Library.XmlDom
+                typeof(Peachpie.Library.Scripting.PhpFunctions).Assembly,   // Peachpie.Library.Scripting
+                typeof(Peachpie.Library.Network.CURLFunctions).Assembly, // cURL
+                typeof(Peachpie.Library.Graphics.PhpGd2).Assembly, // GD2, Image
+                typeof(Peachpie.Library.MySql.MySql).Assembly,  // MySql
+                typeof(Peachpie.Library.MsSql.MsSql).Assembly,  // MsSql
             };
+            var refs = assemblies.Distinct().Select(ass => "/r:" + ass.Location);
+
+            Debug.Assert(refs.Any(r => r.Contains("System.Core")));
+            Debug.Assert(refs.Any(r => r.Contains("Peachpie.Runtime")));
+            Debug.Assert(refs.Any(r => r.Contains("Peachpie.Library")));
 
             //
-            list.AddRange(args);
-            return list.ToArray();
+            return refs.Concat(args).ToArray();
         }
     }
 }

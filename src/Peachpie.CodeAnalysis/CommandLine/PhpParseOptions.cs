@@ -1,4 +1,5 @@
 ﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.PooledObjects;
 using Roslyn.Utilities;
 using System;
 using System.Collections.Generic;
@@ -20,38 +21,57 @@ namespace Pchp.CodeAnalysis
         /// </summary>
         public static PhpParseOptions Default { get; } = new PhpParseOptions();
 
-        private ImmutableDictionary<string, string> _features;
+        ImmutableDictionary<string, string> _features;
+
+        /// <summary>
+        /// Gets required language version.
+        /// <c>null</c> value respects the parser's default which is always the latest version.
+        /// </summary>
+        public Version LanguageVersion { get; private set; }
+
+        /// <summary>
+        /// Whether to allow the deprecated short open tag syntax.
+        /// </summary>
+        public bool AllowShortOpenTags { get; }
 
         public PhpParseOptions(
             DocumentationMode documentationMode = DocumentationMode.Parse,
-            SourceCodeKind kind = SourceCodeKind.Regular)
-            :base(kind, documentationMode)
+            SourceCodeKind kind = SourceCodeKind.Regular,
+            Version languageVersion = null,
+            bool shortOpenTags = false)
+            : base(kind, documentationMode)
         {
             if (!kind.IsValid())
             {
                 throw new ArgumentOutOfRangeException(nameof(kind));
             }
+
+            PhpSyntaxTree.ParseLanguageVersion(ref languageVersion);    // throws if value not supported
+
+            this.LanguageVersion = languageVersion;
+            this.AllowShortOpenTags = shortOpenTags;
         }
 
         internal PhpParseOptions(
             DocumentationMode documentationMode,
             SourceCodeKind kind,
+            Version languageVersion,
+            bool shortOpenTags,
             ImmutableDictionary<string, string> features)
-            : this(documentationMode, kind)
+            : this(documentationMode, kind, languageVersion, shortOpenTags)
         {
-            if (features == null)
-            {
-                throw new ArgumentNullException(nameof(features));
-            }
-
-            _features = features;
+            _features = features ?? throw new ArgumentNullException(nameof(features));
         }
 
         private PhpParseOptions(PhpParseOptions other)
-            : this(documentationMode: other.DocumentationMode, kind: other.Kind)
+            : this(
+                  documentationMode: other.DocumentationMode,
+                  kind: other.Kind,
+                  languageVersion: other.LanguageVersion,
+                  shortOpenTags: other.AllowShortOpenTags)
         {
         }
-        
+
         public new PhpParseOptions WithKind(SourceCodeKind kind)
         {
             if (kind == this.Kind)
@@ -110,6 +130,19 @@ namespace Pchp.CodeAnalysis
             return new PhpParseOptions(this) { _features = features.ToImmutableDictionary(StringComparer.OrdinalIgnoreCase) };
         }
 
+        /// <summary>
+        /// Language version.
+        /// </summary>
+        public PhpParseOptions WithLanguageVersion(Version version)
+        {
+            if (ReferenceEquals(LanguageVersion, version) || LanguageVersion == version)
+            {
+                return this;
+            }
+
+            return new PhpParseOptions(this) { LanguageVersion = version, };
+        }
+
         public override IReadOnlyDictionary<string, string> Features
         {
             get
@@ -125,6 +158,8 @@ namespace Pchp.CodeAnalysis
                 return ImmutableArray<string>.Empty;
             }
         }
+
+        public override string Language => Constants.PhpLanguageName;
 
         //internal bool IsFeatureEnabled(Syntax.LanguageFeatures feature)
         //{
@@ -155,6 +190,11 @@ namespace Pchp.CodeAnalysis
         {
             return
                 Hash.Combine(base.GetHashCodeHelper(), 0);
+        }
+
+        internal override void ValidateOptions(ArrayBuilder<Diagnostic> builder)
+        {
+            // The options are already validated in the setters, throwing exceptions if incorrect
         }
     }
 }

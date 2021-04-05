@@ -104,6 +104,8 @@ namespace Pchp.CodeAnalysis.Symbols
         /// </summary>
         public abstract bool HasConstructorConstraint { get; }
 
+        public virtual bool HasUnmanagedTypeConstraint => false;
+
         /// <summary>
         /// The type parameter kind of this type parameter.
         /// </summary>
@@ -138,10 +140,9 @@ namespace Pchp.CodeAnalysis.Symbols
         }
 
         // Type parameters do not have members
-        public sealed override ImmutableArray<Symbol> GetMembers(string name)
-        {
-            return ImmutableArray<Symbol>.Empty;
-        }
+        public sealed override ImmutableArray<Symbol> GetMembers(string name) => ImmutableArray<Symbol>.Empty;
+
+        public override ImmutableArray<Symbol> GetMembersByPhpName(string name) => ImmutableArray<Symbol>.Empty;
 
         // Type parameters do not have members
         public sealed override ImmutableArray<NamedTypeSymbol> GetTypeMembers()
@@ -467,6 +468,12 @@ namespace Pchp.CodeAnalysis.Symbols
         {
             get { return this.ReducedFrom; }
         }
+
+        NullableAnnotation ITypeParameterSymbol.ReferenceTypeConstraintNullableAnnotation => NullableAnnotation.None;
+
+        bool ITypeParameterSymbol.HasNotNullConstraint => false;
+
+        ImmutableArray<NullableAnnotation> ITypeParameterSymbol.ConstraintNullableAnnotations => ConstraintTypes.SelectAsArray(c => ((ITypeSymbol)c).NullableAnnotation);
 
         #endregion
 

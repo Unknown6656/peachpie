@@ -3,6 +3,7 @@ using System.Collections.Immutable;
 using System.Diagnostics;
 using Roslyn.Utilities;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.Symbols;
 using System;
 
 namespace Pchp.CodeAnalysis.Symbols
@@ -10,7 +11,7 @@ namespace Pchp.CodeAnalysis.Symbols
     /// <summary>
     /// Represents either a namespace or a type.
     /// </summary>
-    internal abstract class NamespaceOrTypeSymbol : Symbol, INamespaceOrTypeSymbol
+    internal abstract class NamespaceOrTypeSymbol : Symbol, INamespaceOrTypeSymbol, INamespaceOrTypeSymbolInternal
     {
         // Only the compiler can create new instances.
         internal NamespaceOrTypeSymbol()
@@ -69,6 +70,13 @@ namespace Pchp.CodeAnalysis.Symbols
         /// <returns>An ImmutableArray containing all the members of this symbol with the given name. If there are
         /// no members with this name, returns an empty ImmutableArray. Never returns null.</returns>
         public abstract ImmutableArray<Symbol> GetMembers(string name);
+
+        /// <summary>
+        /// Gets all the members with particular PHP name visible in PHP scope.
+        /// </summary>
+        /// <param name="name">The case-insensitive name of the symbol (method, field, constant).</param>
+        /// <returns>An ImmutableArray containing all the members with given name.</returns>
+        public abstract ImmutableArray<Symbol> GetMembersByPhpName(string name);
 
         /// <summary>
         /// Get all the members of this symbol that are types.
@@ -157,8 +165,7 @@ namespace Pchp.CodeAnalysis.Symbols
 
             if (scope.Kind == SymbolKind.ErrorType)
             {
-                throw new NotImplementedException();
-                //return new MissingMetadataTypeSymbol.Nested((NamedTypeSymbol)scope, ref emittedTypeName);
+                return new MissingMetadataTypeSymbol.Nested((NamedTypeSymbol)scope, ref emittedTypeName);
             }
 
             NamedTypeSymbol namedType = null;
@@ -175,8 +182,9 @@ namespace Pchp.CodeAnalysis.Symbols
                 if (emittedTypeName.ForcedArity == -1 || emittedTypeName.ForcedArity == emittedTypeName.InferredArity)
                 {
                     // Let's handle mangling case first.
-                    //namespaceOrTypeMembers = scope.GetTypeMembers(emittedTypeName.UnmangledTypeName);
-                    namespaceOrTypeMembers = scope.GetTypeMembers(emittedTypeName.FullName);
+                    namespaceOrTypeMembers = scope.Kind == SymbolKind.NamedType // we don't have proper namese symbols, only global one so FullName it is
+                        ? scope.GetTypeMembers(emittedTypeName.UnmangledTypeName)
+                        : scope.GetTypeMembers(emittedTypeName.FullName);
 
                     foreach (var named in namespaceOrTypeMembers)
                     {

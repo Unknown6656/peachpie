@@ -7,6 +7,8 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Roslyn.Utilities;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.Symbols;
+using Microsoft.CodeAnalysis.PooledObjects;
 using Cci = Microsoft.Cci;
 
 namespace Pchp.CodeAnalysis.Symbols
@@ -14,9 +16,11 @@ namespace Pchp.CodeAnalysis.Symbols
     /// <summary>
     /// Represents a type other than an array, a pointer, a type parameter, and dynamic.
     /// </summary>
-    internal abstract partial class NamedTypeSymbol : TypeSymbol, INamedTypeSymbol
+    internal abstract partial class NamedTypeSymbol : TypeSymbol, INamedTypeSymbol, INamedTypeSymbolInternal
     {
         public abstract int Arity { get; }
+
+        public abstract bool IsSerializable { get; }
 
         /// <summary>
         /// Should the name returned by Name property be mangled with [`arity] suffix in order to get metadata name.
@@ -26,6 +30,14 @@ namespace Pchp.CodeAnalysis.Symbols
         {
             // Intentionally no default implementation to force consideration of appropriate implementation for each new subclass
             get;
+        }
+
+        public override string MetadataName
+        {
+            get
+            {
+                return MangleName ? MetadataHelpers.ComposeAritySuffixedMetadataName(Name, Arity) : Name;
+            }
         }
 
         public override SymbolKind Kind => SymbolKind.NamedType;
@@ -106,13 +118,38 @@ namespace Pchp.CodeAnalysis.Symbols
 
         INamedTypeSymbol INamedTypeSymbol.EnumUnderlyingType => EnumUnderlyingType;
 
+        INamedTypeSymbolInternal INamedTypeSymbolInternal.EnumUnderlyingType => EnumUnderlyingType;
+
+        internal abstract bool HasTypeArgumentsCustomModifiers { get; }
+
         /// <summary>
         /// For enum types, gets the underlying type. Returns null on all other
         /// kinds of types.
         /// </summary>
         public virtual NamedTypeSymbol EnumUnderlyingType => null;
 
-        public virtual bool IsGenericType => false;
+        public virtual NamedTypeSymbol TupleUnderlyingType => null;
+
+        public virtual ImmutableArray<IFieldSymbol> TupleElements => default(ImmutableArray<IFieldSymbol>);
+
+        /// <summary>
+        /// True if this type or some containing type has type parameters.
+        /// </summary>
+        public bool IsGenericType
+        {
+            get
+            {
+                for (var current = this; !ReferenceEquals(current, null); current = current.ContainingType)
+                {
+                    if (current.TypeArgumentsNoUseSiteDiagnostics.Length != 0)
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+        }
 
         public virtual bool IsImplicitClass => false;
 
@@ -146,12 +183,9 @@ namespace Pchp.CodeAnalysis.Symbols
         internal abstract bool ShouldAddWinRTMembers { get; }
 
         /// <summary>
-        /// Returns a flag indicating whether this symbol has at least one applied/inherited conditional attribute.
+        /// Returns a flag indicating whether this symbol is declared conditionally.
         /// </summary>
-        /// <remarks>
-        /// Forces binding and decoding of attributes.
-        /// </remarks>
-        internal bool IsConditional
+        internal virtual bool IsConditional
         {
             get
             {
@@ -160,12 +194,14 @@ namespace Pchp.CodeAnalysis.Symbols
                 //    return true;
                 //}
 
-                // Conditional attributes are inherited by derived types.
-                var baseType = this.BaseType;// NoUseSiteDiagnostics;
-                return (object)baseType != null ? baseType.IsConditional : false;
+                //// Conditional attributes are inherited by derived types.
+                //var baseType = this.BaseType;// NoUseSiteDiagnostics;
+                //return (object)baseType != null ? baseType.IsConditional : false;
+
+                return false;
             }
         }
-        
+
         /// <summary>
         /// Type layout information (ClassLayout metadata and layout kind flags).
         /// </summary>
@@ -177,6 +213,128 @@ namespace Pchp.CodeAnalysis.Symbols
             {
                 return false;
             }
+        }
+
+        internal override bool Equals(TypeSymbol t2, bool ignoreCustomModifiersAndArraySizesAndLowerBounds = false, bool ignoreDynamic = false)
+        {
+            //Debug.Assert(!this.IsTupleType);
+
+            if ((object)t2 == this) return true;
+            if ((object)t2 == null) return false;
+
+            if (ignoreDynamic)
+            {
+                if (t2.TypeKind == TypeKind.Dynamic)
+                {
+                    // if ignoring dynamic, then treat dynamic the same as the type 'object'
+                    if (this.SpecialType == SpecialType.System_Object)
+                    {
+                        return true;
+                    }
+                }
+            }
+
+            //if ((comparison & TypeCompareKind.IgnoreTupleNames) != 0)
+            //{
+            //    // If ignoring tuple element names, compare underlying tuple types
+            //    if (t2.IsTupleType)
+            //    {
+            //        t2 = t2.TupleUnderlyingType;
+            //        if (this.Equals(t2, ignoreCustomModifiersAndArraySizesAndLowerBounds, ignoreDynamic)) return true;
+            //    }
+            //}
+
+            NamedTypeSymbol other = t2 as NamedTypeSymbol;
+            if ((object)other == null) return false;
+
+            // Compare OriginalDefinitions.
+            var thisOriginalDefinition = this.OriginalDefinition;
+            var otherOriginalDefinition = other.OriginalDefinition;
+
+            if (((object)this == (object)thisOriginalDefinition || (object)other == (object)otherOriginalDefinition) &&
+                !(ignoreCustomModifiersAndArraySizesAndLowerBounds && (this.HasTypeArgumentsCustomModifiers || other.HasTypeArgumentsCustomModifiers)))
+            {
+                return false;
+            }
+
+            // CONSIDER: original definitions are not unique for missing metadata type
+            // symbols.  Therefore this code may not behave correctly if 'this' is List<int>
+            // where List`1 is a missing metadata type symbol, and other is similarly List<int>
+            // but for a reference-distinct List`1.
+            if (thisOriginalDefinition != otherOriginalDefinition)
+            {
+                return false;
+            }
+
+            // The checks above are supposed to handle the vast majority of cases.
+            // More complicated cases are handled in a special helper to make the common case scenario simple/fast (fewer locals and smaller stack frame)
+            return EqualsComplicatedCases(other, ignoreCustomModifiersAndArraySizesAndLowerBounds, ignoreDynamic);
+        }
+
+        /// <summary>
+        /// Helper for more complicated cases of Equals like when we have generic instantiations or types nested within them.
+        /// </summary>
+        private bool EqualsComplicatedCases(NamedTypeSymbol other, bool ignoreCustomModifiersAndArraySizesAndLowerBounds = false, bool ignoreDynamic = false)
+        {
+            if ((object)this.ContainingType != null &&
+                !this.ContainingType.Equals(other.ContainingType, ignoreCustomModifiersAndArraySizesAndLowerBounds, ignoreDynamic))
+            {
+                return false;
+            }
+
+            var thisIsNotConstructed = ReferenceEquals(ConstructedFrom, this);
+            var otherIsNotConstructed = ReferenceEquals(other.ConstructedFrom, other);
+
+            if (thisIsNotConstructed && otherIsNotConstructed)
+            {
+                // Note that the arguments might appear different here due to alpha-renaming.  For example, given
+                // class A<T> { class B<U> {} }
+                // The type A<int>.B<int> is "constructed from" A<int>.B<1>, which may be a distinct type object
+                // with a different alpha-renaming of B's type parameter every time that type expression is bound,
+                // but these should be considered the same type each time.
+                return true;
+            }
+
+            if (((thisIsNotConstructed || otherIsNotConstructed) &&
+                 !(ignoreCustomModifiersAndArraySizesAndLowerBounds && (this.HasTypeArgumentsCustomModifiers || other.HasTypeArgumentsCustomModifiers))) ||
+                this.IsUnboundGenericType != other.IsUnboundGenericType)
+            {
+                return false;
+            }
+
+            bool hasTypeArgumentsCustomModifiers = this.HasTypeArgumentsCustomModifiers;
+
+            if (!ignoreCustomModifiersAndArraySizesAndLowerBounds && hasTypeArgumentsCustomModifiers != other.HasTypeArgumentsCustomModifiers)
+            {
+                return false;
+            }
+
+            var typeArguments = this.TypeArgumentsNoUseSiteDiagnostics.ToArray();
+            var otherTypeArguments = other.TypeArgumentsNoUseSiteDiagnostics.ToArray();
+            int count = typeArguments.Length;
+
+            // since both are constructed from the same (original) type, they must have the same arity
+            Debug.Assert(count == otherTypeArguments.Length);
+
+            for (int i = 0; i < count; i++)
+            {
+                if (!typeArguments[i].Equals(otherTypeArguments[i], ignoreCustomModifiersAndArraySizesAndLowerBounds, ignoreDynamic)) return false;
+            }
+
+            if (!ignoreCustomModifiersAndArraySizesAndLowerBounds && hasTypeArgumentsCustomModifiers)
+            {
+                Debug.Assert(other.HasTypeArgumentsCustomModifiers);
+
+                for (int i = 0; i < count; i++)
+                {
+                    if (!this.GetTypeArgumentCustomModifiers(i).SequenceEqual(other.GetTypeArgumentCustomModifiers(i)))
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            return true;
         }
 
         internal NamedTypeSymbol ConstructWithoutModifiers(ImmutableArray<TypeSymbol> arguments, bool unbound)
@@ -256,6 +414,23 @@ namespace Pchp.CodeAnalysis.Symbols
 
         public virtual ImmutableArray<TypeSymbol> TypeArguments => ImmutableArray<TypeSymbol>.Empty;
 
+        /// <summary>
+        /// Returns custom modifiers for the type argument that has been substituted for the type parameter. 
+        /// The modifiers correspond to the type argument at the same ordinal within the <see cref="TypeArgumentsNoUseSiteDiagnostics"/>
+        /// array.
+        /// </summary>
+        public abstract ImmutableArray<CustomModifier> GetTypeArgumentCustomModifiers(int ordinal);
+
+        internal ImmutableArray<CustomModifier> GetEmptyTypeArgumentCustomModifiers(int ordinal)
+        {
+            if (ordinal < 0 || ordinal >= Arity)
+            {
+                throw new System.IndexOutOfRangeException();
+            }
+
+            return ImmutableArray<CustomModifier>.Empty;
+        }
+
         public virtual ImmutableArray<TypeParameterSymbol> TypeParameters => ImmutableArray<TypeParameterSymbol>.Empty;
 
         /// <summary>
@@ -292,15 +467,22 @@ namespace Pchp.CodeAnalysis.Symbols
         /// </summary>
         internal MethodSymbol ResolvePhpCtor(bool recursive = false)
         {
-            var ctor = 
-                this.GetMembers(Devsense.PHP.Syntax.Name.SpecialMethodNames.Construct.Value).OfType<MethodSymbol>().FirstOrDefault() ??
-                this.GetMembers(this.Name).OfType<MethodSymbol>().FirstOrDefault();
+            // resolve __construct()
+            var ctor = GetMembersByPhpName(Devsense.PHP.Syntax.Name.SpecialMethodNames.Construct.Value).OfType<MethodSymbol>().FirstOrDefault();
 
+            // resolve PHP$-like constructor (if the class is not namespaced)
+            if (ctor == null && this.PhpQualifiedName().IsSimpleName)
+            {
+                ctor = this.GetMembersByPhpName(this.Name).OfType<MethodSymbol>().FirstOrDefault();
+            }
+
+            // if method was not resolved, look into parent
             if (ctor == null && recursive)
             {
                 ctor = this.BaseType?.ResolvePhpCtor(true);
             }
 
+            //
             return ctor;
         }
 
@@ -333,6 +515,14 @@ namespace Pchp.CodeAnalysis.Symbols
         }
 
         IMethodSymbol INamedTypeSymbol.DelegateInvokeMethod => DelegateInvokeMethod;
+
+        bool INamedTypeSymbol.IsComImport => false;
+
+        INamedTypeSymbol INamedTypeSymbol.TupleUnderlyingType => TupleUnderlyingType;
+
+        ImmutableArray<NullableAnnotation> INamedTypeSymbol.TypeArgumentNullableAnnotations => TypeArguments.SelectAsArray(a => ((ITypeSymbol)a).NullableAnnotation);
+
+        INamedTypeSymbol INamedTypeSymbol.NativeIntegerUnderlyingType => null;
 
         #endregion
 
@@ -383,6 +573,18 @@ namespace Pchp.CodeAnalysis.Symbols
         public NamedTypeSymbol ConstructUnboundGenericType()
         {
             return OriginalDefinition.AsUnboundGenericType();
+        }
+
+        INamedTypeSymbol INamedTypeSymbol.Construct(ImmutableArray<ITypeSymbol> typeArguments, ImmutableArray<NullableAnnotation> typeArgumentNullableAnnotations)
+        {
+            if (typeArgumentNullableAnnotations.All(annotation => annotation != NullableAnnotation.Annotated))
+            {
+                return this.Construct(typeArguments.CastArray<TypeSymbol>());
+            }
+            else
+            {
+                throw new NotImplementedException();
+            }
         }
 
         #endregion

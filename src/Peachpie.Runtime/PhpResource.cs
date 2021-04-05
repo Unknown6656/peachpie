@@ -1,6 +1,9 @@
-﻿using Pchp.Core;
+﻿#nullable enable
+
+using Pchp.Core;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -12,10 +15,14 @@ namespace Pchp.Core
 	/// Resources rely on GC Finalization - override FreeManaged for cleanup.
 	/// When printing a resource variable in PHP, "Resource id #x" prints out.
 	/// </summary>
-    public class PhpResource : IDisposable, IPhpConvertible
+    [DebuggerDisplay("resource id='{Id}' type='{TypeName,nq}'")]
+    public class PhpResource : IDisposable, IPhpConvertible, IPhpPrintable
     {
         /// <summary>The name of this variable type.</summary>
 		public const string PhpTypeName = "resource";
+
+        /// <summary>The resources' TypeName to be displayed after call to Dispose</summary>
+        static string DisposedTypeName => "Unknown";
 
         /// <summary>
         /// An invalid resource instance.
@@ -34,7 +41,7 @@ namespace Pchp.Core
 		static int RegisterInternalInstance()
         {
             // Even numbers are reserved for internal use (odd for externals)
-            return Interlocked.Increment(ref ResourceIdCounter) * 2;
+            return Interlocked.Increment(ref s_ResourceIdCounter) * 2;
         }
 
         /// <summary>
@@ -71,6 +78,11 @@ namespace Pchp.Core
         /// </summary>
         /// <returns>'Resource id #{ID}'</returns>
         public override string ToString() => PhpTypeName + " id #" + _resourceId;
+
+        /// <summary>
+        /// Implicit conversion to <see cref="PhpValue"/>.
+        /// </summary>
+        public static implicit operator PhpValue(PhpResource @object) => PhpValue.FromClass(@object);
 
         #region IDisposable
 
@@ -148,6 +160,11 @@ namespace Pchp.Core
         /// <summary>false if the resource has been already disposed</summary>
         public bool IsValid => !_disposed;
 
+        /// <summary>
+        /// Explicitly provide empty set of properties to be printed by var_dump or print_r.
+        /// </summary>
+        IEnumerable<KeyValuePair<string, PhpValue>> IPhpPrintable.Properties => Array.Empty<KeyValuePair<string, PhpValue>>();
+
         /// <summary>Unique resource identifier (even for internal resources, odd for external ones).</summary>
         /// <remarks>
         /// Internal resources are given even numbers while resources
@@ -164,19 +181,14 @@ namespace Pchp.Core
         /// <summary>
         /// Set in Dispose to avoid multiple cleanup attempts.
         /// </summary>
-        private bool _disposed = false;
+        private bool _disposed;
 
         /// <summary>Static counter for unique PhpResource instance Id's.</summary>
-        private static int ResourceIdCounter = 0;
-
-        /// <summary>The resources' TypeName to be displayed after call to Dispose</summary>
-        private static string DisposedTypeName = "Unknown";
+        private static int s_ResourceIdCounter;
 
         #region IPhpConvertible
 
-        PhpTypeCode IPhpConvertible.TypeCode => PhpTypeCode.Resource;
-
-        double IPhpConvertible.ToDouble() => (double)((IPhpConvertible)this).ToLong();
+        double IPhpConvertible.ToDouble() => ((IPhpConvertible)this).ToLong();
 
         long IPhpConvertible.ToLong() => IsValid ? Id : 0;
 
@@ -190,11 +202,11 @@ namespace Pchp.Core
             return Convert.NumberInfo.LongInteger;
         }
 
-        string IPhpConvertible.ToString(Context ctx) => ToString();
-
-        string IPhpConvertible.ToStringOrThrow(Context ctx) => ToString();
+        string IPhpConvertible.ToString() => ToString();
 
         object IPhpConvertible.ToClass() => new stdClass(PhpValue.FromClass(this));
+
+        PhpArray IPhpConvertible.ToArray() => PhpArray.New(PhpValue.FromClass(this));
 
         #endregion
     }

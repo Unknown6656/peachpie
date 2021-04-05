@@ -6,6 +6,7 @@ using System.Collections.Immutable;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading.Tasks;
+using Microsoft.CodeAnalysis.Text;
 
 namespace Pchp.CodeAnalysis.Semantics
 {
@@ -16,12 +17,12 @@ namespace Pchp.CodeAnalysis.Semantics
     {
         #region Fields & Properties
 
-        readonly Dictionary<VariableName, BoundVariable>/*!*/_dict = new Dictionary<VariableName, BoundVariable>();
+        readonly Dictionary<VariableName, LocalVariableReference>/*!*/_dict = new Dictionary<VariableName, LocalVariableReference>();
 
         /// <summary>
         /// Enumeration of direct local variables.
         /// </summary>
-        public IEnumerable<BoundVariable> Variables => _dict.Values;
+        public IEnumerable<LocalVariableReference> Variables => _dict.Values;
 
         /// <summary>
         /// Count of local variables.
@@ -31,6 +32,7 @@ namespace Pchp.CodeAnalysis.Semantics
         /// <summary>
         /// Containing routine. Cannot be <c>null</c>.
         /// </summary>
+        public SourceRoutineSymbol Routine => _routine;
         readonly SourceRoutineSymbol _routine;
 
         #endregion
@@ -47,115 +49,61 @@ namespace Pchp.CodeAnalysis.Semantics
             _routine = routine;
 
             //
-            PopuplateParameters();
+            PopulateParameters();
         }
 
         #endregion
 
-        void PopuplateParameters()
+        void PopulateParameters()
         {
             // parameters
-            foreach (var p in _routine.Parameters.OfType<SourceParameterSymbol>())
+            foreach (var p in _routine.SourceParameters)
             {
-                if (!p.IsImplicitlyDeclared)
-                {
-                    _dict[new VariableName(p.Name)] = new BoundParameter(p, p.Initializer);
-                }
+                _dict[new VariableName(p.Name)] = new ParameterReference(p, Routine);
             }
 
             // $this
-            if (_routine.ThisParameter != null) // NOTE: even global code has $this  => routine.HasThis may be false
+            if (_routine.GetPhpThisVariablePlace() != null) // NOTE: even global code has $this  => routine.HasThis may be false
             {
-                _dict[VariableName.ThisVariableName] = new BoundParameter(_routine.ThisParameter, null)
-                {
-                    VariableKind = VariableKind.ThisParameter
-                };
+                _dict[VariableName.ThisVariableName] = new ThisVariableReference(_routine);
             }
         }
 
-        BoundVariable CreateVariable(VariableName name, VariableKind kind, Func<BoundExpression> initializer)
+        LocalVariableReference CreateAutoGlobal(VariableName name, TextSpan span)
         {
-            switch (kind)
-            {
-                case VariableKind.LocalVariable:
-                    Debug.Assert(initializer == null);
-                    return new BoundLocal(new SourceLocalSymbol(_routine, name.Value, kind));
+            return new SuperglobalVariableReference(name, Routine);
+        }
 
-                case VariableKind.StaticVariable:
-                    return new BoundStaticLocal(new SourceLocalSymbol(_routine, name.Value, kind), initializer?.Invoke());
-
-                case VariableKind.GlobalVariable:
-                    Debug.Assert(initializer == null);
-                    return new BoundGlobalVariable(name);
-
-                default:
-                    Debug.Assert(initializer == null);
-                    throw Roslyn.Utilities.ExceptionUtilities.UnexpectedValue(kind);
-            }
+        LocalVariableReference CreateLocal(VariableName name, VariableKind kind, TextSpan span)
+        {
+            Debug.Assert(!name.IsAutoGlobal);
+            return new LocalVariableReference(kind, Routine, new SourceLocalSymbol(Routine, name.Value, span), new BoundVariableName(name));
         }
 
         #region Public methods
 
-        /// <summary>
-        /// Gets variables with given name.
-        /// There might be more variables with same name of a different kind.
-        /// </summary>
-        public IEnumerable<BoundVariable> GetVariables(VariableName name)
+        public bool TryGetVariable(VariableName varname, out LocalVariableReference variable) => _dict.TryGetValue(varname, out variable);
+
+        IVariableReference BindVariable(VariableName varname, TextSpan span, Func<VariableName, TextSpan, LocalVariableReference> factory)
         {
-            foreach (var v in Variables)
+            if (!_dict.TryGetValue(varname, out var value))
             {
-                if (v.Name != null && new VariableName(v.Name).Equals(name))
-                {
-                    yield return v;
-                }
-            }
-        }
-
-        /// <summary>
-        /// Gets enumeration of local variables.
-        /// </summary>
-        public IEnumerable<BoundVariable> GetVariables()
-        {
-            return Variables;
-        }
-
-        /// <summary>
-        /// Gets kind of declared variable or <see cref="VariableKind.LocalVariable"/> by default.
-        /// </summary>
-        public VariableKind GetVariableKind(VariableName varname)
-        {
-            BoundVariable value;
-            return _dict.TryGetValue(varname, out value)
-                ? value.VariableKind
-                : (_routine is SourceGlobalMethodSymbol || varname.IsAutoGlobal)
-                    ? VariableKind.GlobalVariable
-                    : VariableKind.LocalVariable;
-        }
-
-        /// <summary>
-        /// Gets local variable or create local if not yet.
-        /// </summary>
-        public BoundVariable BindVariable(VariableName varname, VariableKind kind, Func<BoundExpression> initializer = null)
-        {
-            BoundVariable value;
-
-            if (_dict.TryGetValue(varname, out value))
-            {
-                if (value.VariableKind != kind)
-                {
-                    // variable redeclared with a different kind
-                    throw new ArgumentException("", nameof(kind));
-                }
-            }
-            else
-            {
-                _dict[varname] = value = CreateVariable(varname, kind, initializer);
+                _dict[varname] = value = factory(varname, span);
             }
 
             //
             Debug.Assert(value != null);
             return value;
         }
+
+        /// <summary>
+        /// Gets local variable or create local if not yet.
+        /// </summary>
+        public IVariableReference BindLocalVariable(VariableName varname, TextSpan span) => BindVariable(varname, span, (name, span) => CreateLocal(name, VariableKind.LocalVariable, span));
+
+        public IVariableReference BindTemporalVariable(VariableName varname) => BindVariable(varname, default, (name, span) => CreateLocal(name, VariableKind.LocalTemporalVariable, span));
+
+        public IVariableReference BindAutoGlobalVariable(VariableName varname) => BindVariable(varname, default, (name, span) => CreateAutoGlobal(name, span));
 
         #endregion
     }

@@ -29,7 +29,7 @@ namespace Pchp.CodeAnalysis.Symbols
             _isStatic = isStatic;
         }
 
-        public override Symbol ContainingSymbol => _type;
+        public override Symbol ContainingSymbol => _containing;
 
         public override Accessibility DeclaredAccessibility => _accessibility;
 
@@ -60,8 +60,6 @@ namespace Pchp.CodeAnalysis.Symbols
         public override bool IsStatic => _isStatic;
 
         public override bool IsVirtual => !IsStatic && (!IsSealed || IsOverride);
-
-        public override ImmutableArray<Location> Locations => ImmutableArray<Location>.Empty;
 
         public override string Name => _name;
 

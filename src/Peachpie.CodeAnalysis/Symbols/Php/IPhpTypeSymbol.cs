@@ -10,40 +10,53 @@ namespace Pchp.CodeAnalysis.Symbols
     /// <summary>
     /// A symbol representing PHP type in CLR.
     /// </summary>
-    interface IPhpTypeSymbol : INamedTypeSymbol
+    public interface IPhpTypeSymbol : INamedTypeSymbol
     {
         /// <summary>
         /// Gets fully qualified name of the class.
         /// </summary>
         QualifiedName FullName { get; }
 
+        /// <summary>
+        /// Gets value indicating the class is declared as a trait.
+        /// </summary>
+        bool IsTrait { get; }
+
+        /// <summary>
+        /// Indicates how the type is being autoloaded in runtime:<br/>
+        /// - 0: the class is not set for autoloading<br/>
+        /// - 1: type is autoloaded<br/>
+        /// - 2: type is autoloaded and the containing script does not have any sideeffects<br/>
+        /// </summary>
+        byte AutoloadFlag { get; }
+
         #region Model
 
         /// <summary>
         /// Optional.
         /// A field holding a reference to current runtime context.
-        /// Is of type <see cref="Pchp.Core.Context"/>.
+        /// Is of type <c>Context</c>.
         /// </summary>
-        FieldSymbol ContextStore { get; }
+        IFieldSymbol ContextStore { get; }
 
         /// <summary>
         /// Optional.
         /// A field holding array of the class runtime fields.
-        /// Is of type <see cref="Pchp.Core.PhpArray"/>.
+        /// Is of type <c>PhpArray</c>.
         /// </summary>
-        FieldSymbol RuntimeFieldsStore { get; }
+        IFieldSymbol RuntimeFieldsStore { get; }
 
         /// <summary>
-        /// Optional.
-        /// A method <c>.phpnew</c> that ensures the initialization of the class without calling the base type constructor.
+        /// Optional. A <c>.ctor</c> that does not make call to PHP constructor.
+        /// This method is expected to be declared with <b>protected</b> visibility and
+        /// used in context of a derived class constructor, since in PHP user calls PHP constructor explicitly.
         /// </summary>
-        MethodSymbol InitializeInstanceMethod { get; }
+        IMethodSymbol InstanceConstructorFieldsOnly { get; }
 
-        /// <summary>
-        /// Optional.
-        /// A nested class <c>__statics</c> containing class static fields and constants which are bound to runtime context.
-        /// </summary>
-        NamedTypeSymbol StaticsContainer { get; }
+        ///// <summary>
+        ///// Gets enumeration of used traits.
+        ///// </summary>
+        //IEnumerable<IPhpTypeSymbol> Traits { get; }
 
         #endregion
     }

@@ -10,6 +10,9 @@ using Pchp.CodeAnalysis.Semantics.Graph;
 using Pchp.CodeAnalysis.FlowAnalysis;
 using Devsense.PHP.Syntax.Ast;
 using Devsense.PHP.Syntax;
+using Pchp.CodeAnalysis.CodeGen;
+using System.Diagnostics;
+using Peachpie.CodeAnalysis;
 
 namespace Pchp.CodeAnalysis.Symbols
 {
@@ -26,7 +29,26 @@ namespace Pchp.CodeAnalysis.Symbols
         /// <summary>
         /// Whether the function is declared conditionally.
         /// </summary>
-        public bool IsConditional => _syntax.IsConditional;
+        public bool IsConditional
+        {
+            get
+            {
+                return _syntax.IsConditional && (Flags & RoutineFlags.MarkedDeclaredUnconditionally) == 0;
+            }
+            set
+            {
+                if (value)
+                {
+                    Flags &= ~RoutineFlags.MarkedDeclaredUnconditionally;
+                    Debug.Assert(IsConditional);
+                }
+                else
+                {
+                    Flags |= RoutineFlags.MarkedDeclaredUnconditionally;
+                    Debug.Assert(IsConditional == false);
+                }
+            }
+        }
 
         public SourceFunctionSymbol(SourceFileSymbol file, FunctionDecl syntax)
         {
@@ -34,11 +56,10 @@ namespace Pchp.CodeAnalysis.Symbols
 
             _file = file;
             _syntax = syntax;
-            _params = BuildParameters(syntax.Signature, syntax.PHPDoc).AsImmutable();
         }
 
         /// <summary>
-        /// A field representing the function info at runtime.
+        /// A field representing the function info at runtime of type <c>RoutineInfo</c>.
         /// Lazily associated with index by runtime.
         /// </summary>
         internal FieldSymbol EnsureRoutineInfoField(Emit.PEModuleBuilder module)
@@ -46,13 +67,26 @@ namespace Pchp.CodeAnalysis.Symbols
             if (_lazyRoutineInfoField == null)
             {
                 _lazyRoutineInfoField = module.SynthesizedManager
-                    .GetOrCreateSynthesizedField(_file, this.DeclaringCompilation.CoreTypes.RoutineInfo, "!" + this.MetadataName, Accessibility.Internal, true, true);
+                    .GetOrCreateSynthesizedField(_file, this.DeclaringCompilation.CoreTypes.RoutineInfo, "<>" + this.MetadataName,
+                        accessibility: Accessibility.Internal,
+                        isstatic: true,
+                        @readonly: true);
             }
 
             return _lazyRoutineInfoField;
         }
 
-        public override ParameterSymbol ThisParameter => null;
+        internal override TypeSymbol EmitLoadRoutineInfo(CodeGenerator cg)
+        {
+            var fld = EnsureRoutineInfoField(cg.Module);
+
+            // Template: .ldsfld <>foo
+            return fld.EmitLoad(cg, holder: null);
+        }
+
+        internal override Signature SyntaxSignature => _syntax.Signature;
+
+        internal override TypeRef SyntaxReturnType => _syntax.ReturnType;
 
         internal override AstNode Syntax => _syntax;
 
@@ -64,8 +98,28 @@ namespace Pchp.CodeAnalysis.Symbols
 
         public override NamedTypeSymbol ContainingType => _file;
 
-        protected override TypeRefContext CreateTypeRefContext()
-            => new TypeRefContext(_syntax.ContainingSourceUnit, null);
+        protected override TypeRefContext CreateTypeRefContext() => new TypeRefContext(DeclaringCompilation, null);
+
+        public override void GetDiagnostics(DiagnosticBag diagnostic)
+        {
+            if (this.QualifiedName == new QualifiedName(Devsense.PHP.Syntax.Name.AutoloadName))
+            {
+                if (AnalysisFacts.IsAutoloadDeprecated(this.DeclaringCompilation.Options.LanguageVersion))
+                {
+                    // __autoload is deprecated
+                    diagnostic.Add(this, _syntax, Errors.ErrorCode.WRN_SymbolDeprecated, string.Empty, this.QualifiedName, Peachpie.CodeAnalysis.Errors.ErrorStrings.AutoloadDeprecatedMessage);
+                }
+
+                // __autoload must have exactly one parameter
+                if (_syntax.Signature.FormalParams.Length != 1)
+                {
+                    diagnostic.Add(this, _syntax.Signature.Span.ToTextSpan(), Errors.ErrorCode.ERR_MustTakeArgs, "Function", this.QualifiedName.ToString(), 1);
+                }
+            }
+
+            //
+            base.GetDiagnostics(diagnostic);
+        }
 
         internal QualifiedName QualifiedName => NameUtils.MakeQualifiedName(_syntax.Name, _syntax.ContainingNamespace);
 
@@ -77,18 +131,21 @@ namespace Pchp.CodeAnalysis.Symbols
             {
                 var name = base.MetadataName;
 
-                if (_syntax.IsConditional)
-                    name += "@" + _file.Functions.TakeWhile(f => f != this).Where(f => f.QualifiedName == this.QualifiedName).Count().ToString();   // index of this function within functions with the same name
+                if (IsConditional)
+                {
+                    // ?order
+                    name += "?" + _file.Functions.TakeWhile(f => f != this).Where(f => f.QualifiedName == this.QualifiedName).Count().ToString();   // index of this function within functions with the same name
+                }
 
                 return name;
             }
         }
 
-        public string PhpName => this.QualifiedName.ToString();
+        public override string RoutineName => this.QualifiedName.ToString();    // __FUNCTION__
 
         public override Symbol ContainingSymbol => _file.SourceModule;
 
-        internal override IModuleSymbol ContainingModule => _file.SourceModule;
+        internal override ModuleSymbol ContainingModule => _file.SourceModule;
 
         public override AssemblySymbol ContainingAssembly => _file.DeclaringCompilation.SourceAssembly;
 
@@ -113,21 +170,5 @@ namespace Pchp.CodeAnalysis.Symbols
         public override bool IsStatic => true;
 
         public override bool IsVirtual => false;
-
-        public override TypeSymbol ReturnType
-        {
-            get
-            {
-                return BuildReturnType(_syntax.Signature, _syntax.ReturnType, _syntax.PHPDoc, this.ResultTypeMask);
-            }
-        }
-
-        public override ImmutableArray<Location> Locations
-        {
-            get
-            {
-                throw new NotImplementedException();
-            }
-        }
     }
 }

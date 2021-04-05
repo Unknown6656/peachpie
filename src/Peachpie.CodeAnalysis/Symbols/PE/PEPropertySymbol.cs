@@ -1,4 +1,6 @@
 ﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.PooledObjects;
+using Pchp.CodeAnalysis.Semantics;
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
@@ -16,7 +18,7 @@ namespace Pchp.CodeAnalysis.Symbols
     /// <summary>
     /// The class to represent all properties imported from a PE/module.
     /// </summary>
-    internal sealed class PEPropertySymbol : PropertySymbol
+    internal sealed class PEPropertySymbol : PropertySymbol, IPhpValue // TODO: IPhpPropertySymbol
     {
         private readonly string _name;
         private readonly PENamedTypeSymbol _containingType;
@@ -26,7 +28,7 @@ namespace Pchp.CodeAnalysis.Symbols
         private readonly PEMethodSymbol _getMethod;
         private readonly PEMethodSymbol _setMethod;
         private readonly ImmutableArray<CustomModifier> _typeCustomModifiers;
-        //private ImmutableArray<AttributeData> _lazyCustomAttributes;
+        private ImmutableArray<AttributeData> _lazyCustomAttributes;
         //private Tuple<CultureInfo, string> _lazyDocComment;
         
         //private ObsoleteAttributeData _lazyObsoleteAttributeData = ObsoleteAttributeData.Uninitialized;
@@ -119,15 +121,15 @@ namespace Pchp.CodeAnalysis.Symbols
 
             if (!callMethodsDirectly)
             {
-                //if ((object)_getMethod != null)
-                //{
-                //    _getMethod.SetAssociatedProperty(this, MethodKind.PropertyGet);
-                //}
+                if ((object)_getMethod != null)
+                {
+                    _getMethod.SetAssociatedProperty(this, MethodKind.PropertyGet);
+                }
 
-                //if ((object)_setMethod != null)
-                //{
-                //    _setMethod.SetAssociatedProperty(this, MethodKind.PropertySet);
-                //}
+                if ((object)_setMethod != null)
+                {
+                    _setMethod.SetAssociatedProperty(this, MethodKind.PropertySet);
+                }
             }
 
             if (callMethodsDirectly)
@@ -372,6 +374,16 @@ namespace Pchp.CodeAnalysis.Symbols
             }
         }
 
+        /// <summary>
+        /// Used for source symbols.
+        /// </summary>
+        public BoundExpression Initializer => null;
+
+        /// <summary>
+        /// Value indicating the field has [NotNull] metadata.
+        /// </summary>
+        public bool HasNotNull => false;
+
         public override ImmutableArray<ParameterSymbol> Parameters
         {
             get { return _parameters; }
@@ -460,13 +472,12 @@ namespace Pchp.CodeAnalysis.Symbols
 
         public override ImmutableArray<AttributeData> GetAttributes()
         {
-            //if (_lazyCustomAttributes.IsDefault)
-            //{
-            //    var containingPEModuleSymbol = (PEModuleSymbol)this.ContainingModule;
-            //    containingPEModuleSymbol.LoadCustomAttributes(_handle, ref _lazyCustomAttributes);
-            //}
-            //return _lazyCustomAttributes;
-            return ImmutableArray<AttributeData>.Empty;
+            if (_lazyCustomAttributes.IsDefault)
+            {
+                var containingPEModuleSymbol = (PEModuleSymbol)this.ContainingModule;
+                containingPEModuleSymbol.LoadCustomAttributes(_handle, ref _lazyCustomAttributes);
+            }
+            return _lazyCustomAttributes;
         }
 
         internal override IEnumerable<AttributeData> GetCustomAttributesToEmit(CommonModuleCompilationState compilationState)

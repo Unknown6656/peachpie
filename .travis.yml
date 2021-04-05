@@ -1,15 +1,29 @@
 sudo: required
-dist: trusty
+dist: xenial
+os: linux
 language: php
 php:
-  - '7.0'
+  - '7.4'
+
+before_install:
+  - ./build/install_dependencies_ubuntu.sh
+#  - echo "extension=sqlite3.so" >> ~/.phpenv/versions/$(phpenv version-name)/etc/php.ini
+#  - echo "extension=pdo_sqlite.so" >> ~/.phpenv/versions/$(phpenv version-name)/etc/php.ini
 
 install:
-  - ./build/install_dependencies_ubuntu14.sh
-  - dotnet restore ./src
-  - dotnet build -f .netcoreapp1.0 ./src/Peachpie.Compiler.Tools
-  - dotnet pack --no-build -c Debug -o ./.nugs --version-suffix beta ./src/Peachpie.Compiler.Tools/project.json
-  - dotnet restore ./Samples
-  - dotnet run -f .netcoreapp1.0 -p ./Samples/ConsoleApplication1
+# do not build the entire solution; there are windows projects included
+#  - dotnet build ./Peachpie.sln
+
+# build the Sdk/compiler:
+  - dotnet build ./src/Peachpie.NET.Sdk/
+
+# install NuGets to NuGet cache:
+  - dotnet restore ./build/dummy -p:DisableImplicitPeachpieReferences=true
+
+# compile tests:
+  - dotnet build ./tests -c Release
+
 script:
-  - ./src/Tools/runtests_shell/runtests.sh
+  - dotnet test ./src/Tests/Peachpie.Runtime.Tests/Peachpie.Runtime.Tests.csproj
+  - dotnet test ./src/Tests/Peachpie.DiagnosticTests/Peachpie.DiagnosticTests.csproj
+  - ./build/runtests.sh

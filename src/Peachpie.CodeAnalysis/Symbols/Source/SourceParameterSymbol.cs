@@ -9,6 +9,7 @@ using System.Diagnostics;
 using Devsense.PHP.Syntax.Ast;
 using Devsense.PHP.Syntax;
 using Pchp.CodeAnalysis.Semantics;
+using System.Threading;
 
 namespace Pchp.CodeAnalysis.Symbols
 {
@@ -19,30 +20,127 @@ namespace Pchp.CodeAnalysis.Symbols
     {
         readonly SourceRoutineSymbol _routine;
         readonly FormalParam _syntax;
-        readonly int _index;
-        readonly PHPDocBlock.ParamTag _ptagOpt;
+
+        /// <summary>
+        /// Index of the source parameter, relative to the first source parameter.
+        /// </summary>
+        readonly int _relindex;
+        
+        internal PHPDocBlock.ParamTag PHPDoc { get; }
+
+        ImmutableArray<AttributeData> _attributes;
 
         TypeSymbol _lazyType;
 
         /// <summary>
         /// Optional. The parameter initializer expression i.e. bound <see cref="FormalParam.InitValue"/>.
         /// </summary>
-        public BoundExpression Initializer => _initializer;
+        public override BoundExpression Initializer => _initializer;
         readonly BoundExpression _initializer;
 
-        public SourceParameterSymbol(SourceRoutineSymbol routine, FormalParam syntax, int index, PHPDocBlock.ParamTag ptagOpt)
+        /// <summary>
+        /// Gets enumeration of parameter source attributes.
+        /// </summary>
+        public IEnumerable<SourceCustomAttribute> SourceAttributes => _attributes.OfType<SourceCustomAttribute>();
+
+        /// <summary>
+        /// Whether the parameter needs to be copied when passed by value.
+        /// Can be set to <c>false</c> by analysis (e.g. unused parameter or only delegation to another method).
+        /// </summary>
+        public bool CopyOnPass { get; set; } = true;
+
+        public override FieldSymbol DefaultValueField
+        {
+            get
+            {
+                if (_lazyDefaultValueField == null && Initializer != null && ExplicitDefaultConstantValue == null)
+                {
+                    TypeSymbol fldtype; // type of the field
+                    
+                    if (Initializer is BoundArrayEx arr)
+                    {
+                        // special case: empty array
+                        if (arr.Items.Length == 0 && !_syntax.PassedByRef)
+                        {
+                            // OPTIMIZATION: reference the singleton field directly, the called routine is responsible to perform copy if necessary
+                            // parameter MUST NOT be `PassedByRef` https://github.com/peachpiecompiler/peachpie/issues/591
+                            // PhpArray.Empty
+                            return DeclaringCompilation.CoreMethods.PhpArray.Empty;
+                        }
+
+                        //   
+                        fldtype = DeclaringCompilation.CoreTypes.PhpArray;
+                    }
+                    else if (Initializer is BoundPseudoClassConst)
+                    {
+                        fldtype = DeclaringCompilation.GetSpecialType(SpecialType.System_String);
+                    }
+                    else
+                    {
+                        fldtype = DeclaringCompilation.CoreTypes.PhpValue;
+                    }
+
+                    // The construction of the default value may require a Context, cannot be created as a static singletong
+                    // Additionally; default values of REF parameter must be created every time from scratch! https://github.com/peachpiecompiler/peachpie/issues/591
+                    if (Initializer.RequiresContext ||
+                        (_syntax.PassedByRef && fldtype.IsReferenceType && fldtype.SpecialType != SpecialType.System_String))  // we can cache the default value even for Refs if it is an immutable value
+                    {
+                        // Func<Context, PhpValue>
+                        fldtype = DeclaringCompilation.GetWellKnownType(WellKnownType.System_Func_T2).Construct(
+                            DeclaringCompilation.CoreTypes.Context,
+                            DeclaringCompilation.CoreTypes.PhpValue);
+                    }
+
+                    // determine the field container:
+                    NamedTypeSymbol fieldcontainer = ContainingType; // by default in the containing class/trait/file
+                    string fieldname = $"<{ContainingSymbol.Name}.{Name}>_DefaultValue";
+
+                    //if (fieldcontainer.IsInterface)
+                    //{
+                    //    fieldcontainer = _routine.ContainingFile;
+                    //    fieldname = ContainingType.Name + "." + fieldname;
+                    //}
+
+                    // public static readonly T ..;
+                    var field = new SynthesizedFieldSymbol(
+                        fieldcontainer,
+                        fldtype,
+                        fieldname,
+                        accessibility: Accessibility.Public,
+                        isStatic: true, isReadOnly: true);
+
+                    //
+                    Interlocked.CompareExchange(ref _lazyDefaultValueField, field, null);
+                }
+                return _lazyDefaultValueField;
+            }
+        }
+        FieldSymbol _lazyDefaultValueField;
+
+        public SourceParameterSymbol(SourceRoutineSymbol routine, FormalParam syntax, int relindex, PHPDocBlock.ParamTag ptagOpt)
         {
             Contract.ThrowIfNull(routine);
             Contract.ThrowIfNull(syntax);
-            Debug.Assert(index >= 0);
+            Debug.Assert(relindex >= 0);
+
 
             _routine = routine;
             _syntax = syntax;
-            _index = index;
-            _ptagOpt = ptagOpt;
+            _relindex = relindex;
+
             _initializer = (syntax.InitValue != null)
-                ? new SemanticsBinder(null).BindExpression(syntax.InitValue, BoundAccess.Read)
+                ? new SemanticsBinder(DeclaringCompilation, routine.ContainingFile.SyntaxTree, locals: null, routine: null, self: routine.ContainingType as SourceTypeSymbol)
+                    .BindWholeExpression(syntax.InitValue, BoundAccess.Read)
+                    .SingleBoundElement()
                 : null;
+
+            var phpattrs = _syntax.GetAttributes();
+            _attributes = phpattrs.Count != 0
+                ? new SemanticsBinder(DeclaringCompilation, routine.ContainingFile.SyntaxTree, locals: null, routine: routine, self: routine.ContainingType as SourceTypeSymbol)
+                    .BindAttributes(phpattrs)
+                : ImmutableArray<AttributeData>.Empty;
+
+            PHPDoc = ptagOpt;
         }
 
         /// <summary>
@@ -54,7 +152,7 @@ namespace Pchp.CodeAnalysis.Symbols
 
         internal override PhpCompilation DeclaringCompilation => _routine.DeclaringCompilation;
 
-        internal override IModuleSymbol ContainingModule => _routine.ContainingModule;
+        internal override ModuleSymbol ContainingModule => _routine.ContainingModule;
 
         public override NamedTypeSymbol ContainingType => _routine.ContainingType;
 
@@ -64,18 +162,49 @@ namespace Pchp.CodeAnalysis.Symbols
 
         public FormalParam Syntax => _syntax;
 
+        /// <summary>
+        /// The parameter is a constructor property.
+        /// </summary>
+        public bool IsConstructorProperty => _syntax.IsConstructorProperty;
+
         internal sealed override TypeSymbol Type
         {
             get
             {
                 if (_lazyType == null)
                 {
-                    _lazyType = ResolveType();
+                    Interlocked.CompareExchange(ref _lazyType, ResolveType(), null);
                 }
 
                 return _lazyType;
             }
         }
+
+        /// <summary>
+        /// Gets value indicating that if the parameters type is a reference type,
+        /// it is not allowed to pass a null value.
+        /// </summary>
+        public override bool HasNotNull
+        {
+            get
+            {
+                // when providing type hint, only allow null if explicitly specified:
+                if (_syntax.TypeHint == null || _syntax.TypeHint is NullableTypeRef || DefaultsToNull)
+                {
+                    return false;
+                }
+
+                //
+                return true;
+            }
+        }
+
+        internal bool DefaultsToNull => _initializer != null && _initializer.ConstantValue.IsNull();
+
+        /// <summary>
+        /// Gets value indicating whether the parameter has been replaced with <see cref="SourceRoutineSymbol.VarargsParam"/>.
+        /// </summary>
+        internal bool IsFake => (Routine.GetParamsParameter() != null && Routine.GetParamsParameter() != this && Ordinal >= Routine.GetParamsParameter().Ordinal);
 
         TypeSymbol ResolveType()
         {
@@ -98,17 +227,34 @@ namespace Pchp.CodeAnalysis.Symbols
             // aliased parameter:
             if (_syntax.IsOut || _syntax.PassedByRef)
             {
-                return DeclaringCompilation.CoreTypes.PhpAlias;
+                if (_syntax.IsVariadic)
+                {
+                    // PhpAlias[]
+                    return ArrayTypeSymbol.CreateSZArray(this.ContainingAssembly, DeclaringCompilation.CoreTypes.PhpAlias);
+                }
+                else
+                {
+                    // PhpAlias
+                    return DeclaringCompilation.CoreTypes.PhpAlias;
+                }
             }
 
             // 1. specified type hint
-            var result = DeclaringCompilation.GetTypeFromTypeRef(_syntax.TypeHint);
+            var typeHint = _syntax.TypeHint;
+            if (typeHint is ReservedTypeRef rtref)
+            {
+                // workaround for https://github.com/peachpiecompiler/peachpie/issues/281
+                // remove once it gets updated in parser
+                if (rtref.Type == ReservedTypeRef.ReservedType.self) return _routine.ContainingType; // self
+            }
+            var result = DeclaringCompilation.GetTypeFromTypeRef(typeHint, _routine.ContainingType as SourceTypeSymbol, nullable: DefaultsToNull);
 
             // 2. optionally type specified in PHPDoc
-            if (result == null && _ptagOpt != null && _ptagOpt.TypeNamesArray.Length != 0)
+            if (result == null && PHPDoc != null && PHPDoc.TypeNamesArray.Length != 0
+                && (DeclaringCompilation.Options.PhpDocTypes & PhpDocTypes.ParameterTypes) != 0)
             {
                 var typectx = _routine.TypeRefContext;
-                var tmask = FlowAnalysis.PHPDoc.GetTypeMask(typectx, _ptagOpt.TypeNamesArray, _routine.GetNamingContext());
+                var tmask = FlowAnalysis.PHPDoc.GetTypeMask(typectx, PHPDoc.TypeNamesArray, _routine.GetNamingContext());
                 if (!tmask.IsVoid && !tmask.IsAnyType)
                 {
                     result = DeclaringCompilation.GetTypeFromTypeRef(typectx, tmask);
@@ -126,8 +272,7 @@ namespace Pchp.CodeAnalysis.Symbols
             // variadic (result[])
             if (_syntax.IsVariadic)
             {
-                // result = ArraySZSymbol.FromElement(result);
-                throw new NotImplementedException();
+                result = ArrayTypeSymbol.CreateSZArray(this.ContainingAssembly, result);
             }
 
             //
@@ -147,13 +292,18 @@ namespace Pchp.CodeAnalysis.Symbols
 
         public override bool IsParams => _syntax.IsVariadic;
 
-        public override int Ordinal => _index;
+        public override int Ordinal => _relindex + _routine.ImplicitParameters.Length;
+
+        /// <summary>
+        /// Zero-based index of the source parameter.
+        /// </summary>
+        public int ParameterIndex => _relindex;
 
         public override ImmutableArray<Location> Locations
         {
             get
             {
-                throw new NotImplementedException();
+                return ImmutableArray.Create(Location.Create(Routine.ContainingFile.SyntaxTree, _syntax.Name.Span.ToTextSpan()));
             }
         }
 
@@ -162,6 +312,35 @@ namespace Pchp.CodeAnalysis.Symbols
             get
             {
                 throw new NotImplementedException();
+            }
+        }
+
+        public override ImmutableArray<AttributeData> GetAttributes() => _attributes;
+        
+        internal override IEnumerable<AttributeData> GetCustomAttributesToEmit(CommonModuleCompilationState compilationState)
+        {
+            // [param]   
+            if (IsParams)
+            {
+                yield return DeclaringCompilation.CreateParamsAttribute();
+            }
+
+            // [Nullable(1)] - does not return null
+            if (HasNotNull && Type.IsReferenceType)
+            {
+                yield return DeclaringCompilation.CreateNullableAttribute(NullableContextUtils.NotAnnotatedAttributeValue);
+            }
+
+            // [DefaultValue]
+            if (DefaultValueField != null)
+            {
+                yield return DeclaringCompilation.CreateDefaultValueAttribute(ContainingType, DefaultValueField);
+            }
+
+            //
+            foreach (var attr in GetAttributes())
+            {
+                yield return attr;
             }
         }
 
@@ -183,10 +362,7 @@ namespace Pchp.CodeAnalysis.Symbols
                         return value;
                     }
 
-                    // old way: // TO BE REMOVED // TODO: analysis of literal expression has to resolve its ConstantValue
-                    value = SemanticsBinder.TryGetConstantValue(this.DeclaringCompilation, _syntax.InitValue);
-
-                    // NOTE: non-literal default values (like array()) must be handled by creating a method overload calling this method:
+                    // NOTE: non-literal default values (like array()) must be handled by creating a ghost method overload calling this method:
 
                     // Template:
                     // foo($a = [], $b = [1, 2, 3]) =>

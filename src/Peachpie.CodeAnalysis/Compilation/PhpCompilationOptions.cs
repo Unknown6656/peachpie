@@ -1,4 +1,5 @@
 ﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.PooledObjects;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -9,6 +10,35 @@ using Roslyn.Utilities;
 
 namespace Pchp.CodeAnalysis
 {
+    /// <summary>
+    /// Options for getting type information from correspodning PHPDoc comments.
+    /// </summary>
+    [Flags]
+    public enum PhpDocTypes
+    {
+        None = 0,
+
+        /// <summary>
+        /// Fields type will be declared according to PHPDoc @var tag.
+        /// </summary>
+        FieldTypes = 1,
+
+        /// <summary>
+        /// Parameter type will be declared according to PHPDoc @param tag.
+        /// </summary>
+        ParameterTypes = 2,
+
+        /// <summary>
+        /// Method return type will be declared according to PHPDoc @return tag.
+        /// </summary>
+        ReturnTypes = 4,
+
+        /// <summary>
+        /// Declare all additional type information from PHPDoc.
+        /// </summary>
+        All = FieldTypes | ParameterTypes | ReturnTypes,
+    }
+
     /// <summary>
     /// Represents various options that affect compilation, such as 
     /// whether to emit an executable or a library, whether to optimize
@@ -23,10 +53,92 @@ namespace Pchp.CodeAnalysis
         public string BaseDirectory { get; private set; }
 
         /// <summary>
+        /// A path where all the compiled scripts will be moved virtually.
+        /// File "a/index.php" will be compiled into "<see cref="SubDirectory"/>/a/index.php"
+        /// </summary>
+        public string SubDirectory { get; private set; }
+
+        /// <summary>
         /// Compilation root directory.
         /// All script paths will be emitted relatively to this path.
         /// </summary>
         public string SdkDirectory { get; private set; }
+
+        /// <summary>
+        /// What framework is the compiled assembly supposed to run on,
+        /// e.g. <c>.NETCoreApp,Version=v3.1</c>.
+        /// </summary>
+        public string TargetFramework { get; private set; }
+
+        /// <summary>
+        /// Options for getting type information from correspodning PHPDoc comments.
+        /// </summary>
+        public PhpDocTypes PhpDocTypes { get; private set; }
+
+        /// <summary>
+        /// Whether to generate an embedded resource containing additional information about the source symbols.
+        /// Used by runtime for reflection.
+        /// Default is <c>true</c>.
+        /// </summary>
+        public bool EmbedSourceMetadata { get; private set; }
+
+        /// <summary>
+        /// Source language options.
+        /// </summary>
+        public PhpParseOptions ParseOptions { get; private set; }
+
+        /// <summary>
+        /// The compilation language version.
+        /// Gets <see cref="PhpParseOptions.LanguageVersion"/> or default language version if not specified.
+        /// </summary>
+        public Version LanguageVersion => ParseOptions?.LanguageVersion ?? PhpSyntaxTree.DefaultLanguageVersion;
+
+        /// <summary>
+        /// Options diagnostics.
+        /// </summary>
+        public ImmutableArray<Diagnostic> Diagnostics { get; private set; }
+
+        /// <summary>
+        /// The file version string.
+        /// </summary>
+        public string VersionString { get; private set; }
+
+        /// <summary>
+        /// List of observer instances.
+        /// </summary>
+        public ImmutableArray<IObserver<object>> EventSources { get; internal set; }
+
+        /// <summary>
+        /// The compilation optimization level.
+        /// </summary>
+        public new PhpOptimizationLevel OptimizationLevel { get; internal set; }
+
+        /// <summary>
+        /// Set of compile-time defined constants.
+        /// </summary>
+        public ImmutableDictionary<string, string> Defines { get; internal set; }
+
+        /// <summary>
+        /// Set of relative file names from which class map will be generated.
+        /// Contained types will be marked as autoloaded.
+        /// </summary>
+        public ISet<string> Autoload_ClassMapFiles { get; internal set; }
+
+        /// <summary>
+        /// Set of relative file names to be marked as autoloaded.
+        /// </summary>
+        public ISet<string> Autoload_Files { get; internal set; }
+
+        /// <summary>
+        /// Collection of PSR-4 autoload rules.
+        /// Matching types (classes, traits and interfaces) will be marked as autoloaded.
+        /// </summary>
+        public IReadOnlyCollection<(string prefix, string path)> Autoload_PSR4 { get; internal set; }
+
+        /// <summary>
+        /// Global Nullable context options.
+        /// </summary>
+        public override NullableContextOptions NullableContextOptions { get; protected set; }
 
         ///// <summary>
         ///// Flags applied to the top-level binder created for each syntax tree in the compilation 
@@ -40,15 +152,18 @@ namespace Pchp.CodeAnalysis
             OutputKind outputKind,
             string baseDirectory,
             string sdkDirectory,
+            string subDirectory = null,
+            string targetFramework = null,
             bool reportSuppressedDiagnostics = false,
             string moduleName = null,
             string mainTypeName = null,
             string scriptClassName = null,
-            OptimizationLevel optimizationLevel = OptimizationLevel.Debug,
+            string versionString = null,
+            PhpOptimizationLevel optimizationLevel = PhpOptimizationLevel.Debug,
             bool checkOverflow = false,
             string cryptoKeyContainer = null,
             string cryptoKeyFile = null,
-            ImmutableArray<byte> cryptoPublicKey = default(ImmutableArray<byte>),
+            ImmutableArray<byte> cryptoPublicKey = default,
             bool? delaySign = null,
             Platform platform = Platform.AnyCpu,
             ReportDiagnostic generalDiagnosticOption = ReportDiagnostic.Default,
@@ -56,27 +171,43 @@ namespace Pchp.CodeAnalysis
             IEnumerable<KeyValuePair<string, ReportDiagnostic>> specificDiagnosticOptions = null,
             bool concurrentBuild = true,
             bool deterministic = false,
+            DateTime currentLocalTime = default(DateTime),
             XmlReferenceResolver xmlReferenceResolver = null,
             SourceReferenceResolver sourceReferenceResolver = null,
             MetadataReferenceResolver metadataReferenceResolver = null,
             AssemblyIdentityComparer assemblyIdentityComparer = null,
             StrongNameProvider strongNameProvider = null,
-            bool publicSign = false)
-            : this(outputKind, baseDirectory, sdkDirectory,
+            bool publicSign = false,
+            PhpDocTypes phpdocTypes = PhpDocTypes.None,
+            bool embedSourceMetadata = true,
+            ImmutableArray<Diagnostic> diagnostics = default,
+            PhpParseOptions parseOptions = null,
+            ImmutableDictionary<string, string> defines = default,
+            bool referencesSupersedeLowerVersions = false,
+            NullableContextOptions nullableContextOptions = NullableContextOptions.Disable)
+            : this(outputKind, baseDirectory, sdkDirectory, subDirectory, targetFramework,
                    reportSuppressedDiagnostics, moduleName, mainTypeName, scriptClassName,
+                   versionString,
                    optimizationLevel, checkOverflow,
                    cryptoKeyContainer, cryptoKeyFile, cryptoPublicKey, delaySign, platform,
                    generalDiagnosticOption, warningLevel,
                    specificDiagnosticOptions, concurrentBuild, deterministic,
-                   extendedCustomDebugInformation: true,
                    debugPlusMode: false,
+                   currentLocalTime: currentLocalTime,
                    xmlReferenceResolver: xmlReferenceResolver,
                    sourceReferenceResolver: sourceReferenceResolver,
                    metadataReferenceResolver: metadataReferenceResolver,
                    assemblyIdentityComparer: assemblyIdentityComparer,
                    strongNameProvider: strongNameProvider,
                    metadataImportOptions: MetadataImportOptions.Public,
-                   publicSign: publicSign)
+                   publicSign: publicSign,
+                   phpdocTypes: phpdocTypes,
+                   embedSourceMetadata: embedSourceMetadata,
+                   diagnostics: diagnostics,
+                   defines: defines,
+                   parseOptions: parseOptions,
+                   referencesSupersedeLowerVersions: referencesSupersedeLowerVersions,
+                   nullableContextOptions: nullableContextOptions)
         {
         }
 
@@ -85,11 +216,14 @@ namespace Pchp.CodeAnalysis
             OutputKind outputKind,
             string baseDirectory,
             string sdkDirectory,
+            string subDirectory,
+            string targetFramework,
             bool reportSuppressedDiagnostics,
             string moduleName,
             string mainTypeName,
             string scriptClassName,
-            OptimizationLevel optimizationLevel,
+            string versionString,
+            PhpOptimizationLevel optimizationLevel,
             bool checkOverflow,
             string cryptoKeyContainer,
             string cryptoKeyFile,
@@ -101,7 +235,7 @@ namespace Pchp.CodeAnalysis
             IEnumerable<KeyValuePair<string, ReportDiagnostic>> specificDiagnosticOptions,
             bool concurrentBuild,
             bool deterministic,
-            bool extendedCustomDebugInformation,
+            DateTime currentLocalTime,
             bool debugPlusMode,
             XmlReferenceResolver xmlReferenceResolver,
             SourceReferenceResolver sourceReferenceResolver,
@@ -109,25 +243,45 @@ namespace Pchp.CodeAnalysis
             AssemblyIdentityComparer assemblyIdentityComparer,
             StrongNameProvider strongNameProvider,
             MetadataImportOptions metadataImportOptions,
-            bool publicSign)
+            bool publicSign,
+            PhpDocTypes phpdocTypes,
+            bool embedSourceMetadata,
+            ImmutableArray<Diagnostic> diagnostics,
+            PhpParseOptions parseOptions,
+            ImmutableDictionary<string, string> defines,
+            bool referencesSupersedeLowerVersions,
+            NullableContextOptions nullableContextOptions)
             : base(outputKind, reportSuppressedDiagnostics, moduleName, mainTypeName, scriptClassName,
-                   cryptoKeyContainer, cryptoKeyFile, cryptoPublicKey, delaySign, publicSign, optimizationLevel, checkOverflow,
+                   cryptoKeyContainer, cryptoKeyFile, cryptoPublicKey, delaySign, publicSign, optimizationLevel.AsOptimizationLevel(), checkOverflow,
                    platform, generalDiagnosticOption, warningLevel, specificDiagnosticOptions.ToImmutableDictionaryOrEmpty(),
-                   concurrentBuild, deterministic, extendedCustomDebugInformation, debugPlusMode, xmlReferenceResolver,
+                   concurrentBuild, deterministic, currentLocalTime, debugPlusMode, xmlReferenceResolver,
                    sourceReferenceResolver, metadataReferenceResolver, assemblyIdentityComparer,
-                   strongNameProvider, metadataImportOptions)
+                   strongNameProvider, metadataImportOptions, referencesSupersedeLowerVersions)
         {
             this.BaseDirectory = baseDirectory;
             this.SdkDirectory = sdkDirectory;
+            this.SubDirectory = subDirectory;
+            this.TargetFramework = targetFramework;
+            this.PhpDocTypes = phpdocTypes;
+            this.EmbedSourceMetadata = embedSourceMetadata;
+            this.ParseOptions = parseOptions;
+            this.Diagnostics = diagnostics;
+            this.VersionString = versionString;
+            this.OptimizationLevel = optimizationLevel;
+            this.Defines = defines;
+            this.NullableContextOptions = nullableContextOptions;
         }
 
         private PhpCompilationOptions(PhpCompilationOptions other) : this(
             outputKind: other.OutputKind,
             baseDirectory: other.BaseDirectory,
             sdkDirectory: other.SdkDirectory,
+            subDirectory: other.SubDirectory,
+            targetFramework: other.TargetFramework,
             moduleName: other.ModuleName,
             mainTypeName: other.MainTypeName,
             scriptClassName: other.ScriptClassName,
+            versionString: other.VersionString,
             optimizationLevel: other.OptimizationLevel,
             checkOverflow: other.CheckOverflow,
             cryptoKeyContainer: other.CryptoKeyContainer,
@@ -140,7 +294,7 @@ namespace Pchp.CodeAnalysis
             specificDiagnosticOptions: other.SpecificDiagnosticOptions,
             concurrentBuild: other.ConcurrentBuild,
             deterministic: other.Deterministic,
-            extendedCustomDebugInformation: other.ExtendedCustomDebugInformation,
+            currentLocalTime: other.CurrentLocalTime,
             debugPlusMode: other.DebugPlusMode,
             xmlReferenceResolver: other.XmlReferenceResolver,
             sourceReferenceResolver: other.SourceReferenceResolver,
@@ -149,9 +303,22 @@ namespace Pchp.CodeAnalysis
             strongNameProvider: other.StrongNameProvider,
             metadataImportOptions: other.MetadataImportOptions,
             reportSuppressedDiagnostics: other.ReportSuppressedDiagnostics,
-            publicSign: other.PublicSign)
+            publicSign: other.PublicSign,
+            phpdocTypes: other.PhpDocTypes,
+            embedSourceMetadata: other.EmbedSourceMetadata,
+            diagnostics: other.Diagnostics,
+            parseOptions: other.ParseOptions,
+            defines: other.Defines,
+            referencesSupersedeLowerVersions: other.ReferencesSupersedeLowerVersions,
+            nullableContextOptions: other.NullableContextOptions)
         {
+            EventSources = other.EventSources;
+            Autoload_ClassMapFiles = other.Autoload_ClassMapFiles;
+            Autoload_Files = other.Autoload_Files;
+            Autoload_PSR4 = other.Autoload_PSR4;
         }
+
+        public override string Language => Constants.PhpLanguageName;
 
         internal override ImmutableArray<string> GetImports() => ImmutableArray<string>.Empty; // Usings;
 
@@ -165,7 +332,7 @@ namespace Pchp.CodeAnalysis
             return new PhpCompilationOptions(this) { OutputKind = kind };
         }
 
-        public PhpCompilationOptions WithModuleName(string moduleName)
+        public new PhpCompilationOptions WithModuleName(string moduleName)
         {
             if (moduleName == this.ModuleName)
             {
@@ -175,7 +342,7 @@ namespace Pchp.CodeAnalysis
             return new PhpCompilationOptions(this) { ModuleName = moduleName };
         }
 
-        public PhpCompilationOptions WithScriptClassName(string name)
+        public new PhpCompilationOptions WithScriptClassName(string name)
         {
             if (name == this.ScriptClassName)
             {
@@ -185,7 +352,7 @@ namespace Pchp.CodeAnalysis
             return new PhpCompilationOptions(this) { ScriptClassName = name };
         }
 
-        public PhpCompilationOptions WithMainTypeName(string name)
+        public new PhpCompilationOptions WithMainTypeName(string name)
         {
             if (name == this.MainTypeName)
             {
@@ -195,7 +362,7 @@ namespace Pchp.CodeAnalysis
             return new PhpCompilationOptions(this) { MainTypeName = name };
         }
 
-        public PhpCompilationOptions WithCryptoKeyContainer(string name)
+        public new PhpCompilationOptions WithCryptoKeyContainer(string name)
         {
             if (name == this.CryptoKeyContainer)
             {
@@ -205,7 +372,7 @@ namespace Pchp.CodeAnalysis
             return new PhpCompilationOptions(this) { CryptoKeyContainer = name };
         }
 
-        public PhpCompilationOptions WithCryptoKeyFile(string path)
+        public new PhpCompilationOptions WithCryptoKeyFile(string path)
         {
             if (path == this.CryptoKeyFile)
             {
@@ -215,7 +382,7 @@ namespace Pchp.CodeAnalysis
             return new PhpCompilationOptions(this) { CryptoKeyFile = path };
         }
 
-        public PhpCompilationOptions WithCryptoPublicKey(ImmutableArray<byte> value)
+        public new PhpCompilationOptions WithCryptoPublicKey(ImmutableArray<byte> value)
         {
             if (value.IsDefault)
             {
@@ -230,7 +397,7 @@ namespace Pchp.CodeAnalysis
             return new PhpCompilationOptions(this) { CryptoPublicKey = value };
         }
 
-        public PhpCompilationOptions WithDelaySign(bool? value)
+        public new PhpCompilationOptions WithDelaySign(bool? value)
         {
             if (value == this.DelaySign)
             {
@@ -242,15 +409,15 @@ namespace Pchp.CodeAnalysis
 
         public new PhpCompilationOptions WithOptimizationLevel(OptimizationLevel value)
         {
-            if (value == this.OptimizationLevel)
+            if (value == base.OptimizationLevel)
             {
                 return this;
             }
 
-            return new PhpCompilationOptions(this) { OptimizationLevel = value };
+            return new PhpCompilationOptions(this) { OptimizationLevel = value.AsPhpOptimizationLevel() };
         }
 
-        public PhpCompilationOptions WithOverflowChecks(bool enabled)
+        public new PhpCompilationOptions WithOverflowChecks(bool enabled)
         {
             if (enabled == this.CheckOverflow)
             {
@@ -278,6 +445,16 @@ namespace Pchp.CodeAnalysis
             }
 
             return new PhpCompilationOptions(this) { PublicSign = publicSign };
+        }
+
+        public PhpCompilationOptions WithParseOptions(PhpParseOptions parseoptions)
+        {
+            if (ReferenceEquals(this.ParseOptions, parseoptions))
+            {
+                return this;
+            }
+
+            return new PhpCompilationOptions(this) { ParseOptions = parseoptions };
         }
 
         protected override CompilationOptions CommonWithGeneralDiagnosticOption(ReportDiagnostic value) => WithGeneralDiagnosticOption(value);
@@ -339,7 +516,7 @@ namespace Pchp.CodeAnalysis
             return new PhpCompilationOptions(this) { WarningLevel = warningLevel };
         }
 
-        public PhpCompilationOptions WithConcurrentBuild(bool concurrentBuild)
+        public new PhpCompilationOptions WithConcurrentBuild(bool concurrentBuild)
         {
             if (concurrentBuild == this.ConcurrentBuild)
             {
@@ -359,17 +536,7 @@ namespace Pchp.CodeAnalysis
             return new PhpCompilationOptions(this) { Deterministic = deterministic };
         }
 
-        internal PhpCompilationOptions WithExtendedCustomDebugInformation(bool extendedCustomDebugInformation)
-        {
-            if (extendedCustomDebugInformation == this.ExtendedCustomDebugInformation)
-            {
-                return this;
-            }
-
-            return new PhpCompilationOptions(this) { ExtendedCustomDebugInformation_internal_protected_set = extendedCustomDebugInformation };
-        }
-
-        internal PhpCompilationOptions WithDebugPlusMode(bool debugPlusMode)
+        public PhpCompilationOptions WithDebugPlusMode(bool debugPlusMode)
         {
             if (debugPlusMode == this.DebugPlusMode)
             {
@@ -379,14 +546,24 @@ namespace Pchp.CodeAnalysis
             return new PhpCompilationOptions(this) { DebugPlusMode_internal_protected_set = debugPlusMode };
         }
 
-        internal PhpCompilationOptions WithMetadataImportOptions(MetadataImportOptions value)
+        public PhpCompilationOptions WithDefines(ImmutableDictionary<string, string> defines)
+        {
+            if (this.Defines == defines)
+            {
+                return this;
+            }
+
+            return new PhpCompilationOptions(this) { Defines = defines };
+        }
+
+        public new PhpCompilationOptions WithMetadataImportOptions(MetadataImportOptions value)
         {
             if (value == this.MetadataImportOptions)
             {
                 return this;
             }
 
-            return new PhpCompilationOptions(this) { MetadataImportOptions_internal_protected_set = value };
+            return new PhpCompilationOptions(this) { MetadataImportOptions = value };
         }
 
         public new PhpCompilationOptions WithXmlReferenceResolver(XmlReferenceResolver resolver)
@@ -465,6 +642,36 @@ namespace Pchp.CodeAnalysis
 
         protected override CompilationOptions CommonWithStrongNameProvider(StrongNameProvider provider) =>
             WithStrongNameProvider(provider);
+
+        protected override CompilationOptions CommonWithConcurrentBuild(bool concurrent) =>
+            WithConcurrentBuild(concurrent);
+
+        protected override CompilationOptions CommonWithModuleName(string moduleName) =>
+            WithModuleName(moduleName);
+
+        protected override CompilationOptions CommonWithMainTypeName(string mainTypeName) =>
+            WithMainTypeName(mainTypeName);
+
+        protected override CompilationOptions CommonWithScriptClassName(string scriptClassName) =>
+            WithScriptClassName(scriptClassName);
+
+        protected override CompilationOptions CommonWithCryptoKeyContainer(string cryptoKeyContainer) =>
+            WithCryptoKeyContainer(cryptoKeyContainer);
+
+        protected override CompilationOptions CommonWithCryptoKeyFile(string cryptoKeyFile) =>
+            WithCryptoKeyFile(cryptoKeyFile);
+
+        protected override CompilationOptions CommonWithCryptoPublicKey(ImmutableArray<byte> cryptoPublicKey) =>
+            WithCryptoPublicKey(cryptoPublicKey);
+
+        protected override CompilationOptions CommonWithDelaySign(bool? delaySign) =>
+            WithDelaySign(delaySign);
+
+        protected override CompilationOptions CommonWithCheckOverflow(bool checkOverflow) =>
+            WithOverflowChecks(checkOverflow);
+
+        protected override CompilationOptions CommonWithMetadataImportOptions(MetadataImportOptions value) =>
+            WithMetadataImportOptions(value);
 
         [Obsolete]
         protected override CompilationOptions CommonWithFeatures(ImmutableArray<string> features)
@@ -582,7 +789,25 @@ namespace Pchp.CodeAnalysis
 
         internal override Diagnostic FilterDiagnostic(Diagnostic diagnostic)
         {
-            return diagnostic; // return PhpDiagnosticFilter.Filter(diagnostic, WarningLevel, GeneralDiagnosticOption, SpecificDiagnosticOptions);
+            // return PhpDiagnosticFilter.Filter(diagnostic, WarningLevel, GeneralDiagnosticOption, SpecificDiagnosticOptions);
+
+            if (diagnostic == null)
+            {
+                return null;
+            }
+
+            ReportDiagnostic reportAction;
+
+            if (SpecificDiagnosticOptions != null && SpecificDiagnosticOptions.TryGetValue(diagnostic.Id, out ReportDiagnostic d))
+            {
+                reportAction = d;
+            }
+            else
+            {
+                reportAction = ReportDiagnostic.Default;
+            }
+
+            return diagnostic.WithReportDiagnostic(reportAction);
         }
     }
 }

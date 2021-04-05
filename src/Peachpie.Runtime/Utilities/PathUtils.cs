@@ -1,26 +1,110 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Linq;
+using System.IO;
 using System.Text;
-using System.Threading.Tasks;
+using Pchp.Core.Resources;
 
 namespace Pchp.Core.Utilities
 {
-    static class PathUtils
+    #region PathUtils
+
+    public static class PathUtils
     {
+        /// <summary>
+        /// Windows-style path separator (back slash).
+        /// </summary>
         public const char DirectorySeparator = '\\';
+
+        /// <summary>
+        /// Linux-style path separator (forward slash).
+        /// </summary>
         public const char AltDirectorySeparator = '/';
 
+        static readonly char[] s_DirectorySeparators = new[] { DirectorySeparator, AltDirectorySeparator };
+
         public static bool IsDirectorySeparator(this char ch) => ch == DirectorySeparator || ch == AltDirectorySeparator;
+
+        public static string TrimEndSeparator(this string path)
+        {
+            return IsDirectorySeparator(path.LastChar())
+                ? path.Remove(path.Length - 1)
+                : path;
+        }
+
+        public static ReadOnlySpan<char> TrimFileName(string path)
+        {
+            var index = path.LastIndexOfAny(s_DirectorySeparators);
+            return (index <= 0)
+                ? ReadOnlySpan<char>.Empty
+                : path.AsSpan(0, index);
+        }
+
+        /// <summary>
+        /// Gets the file name portion of the given path.
+        /// Trailing slashes are trimmed off.
+        /// </summary>
+        public static ReadOnlySpan<char> GetFileName(ReadOnlySpan<char> path)
+        {
+            for (int index = path.Length - 1; index >= 0; index--)
+            {
+                var c = path[index];
+
+                if (c == DirectorySeparator || c == AltDirectorySeparator)
+                {
+                    if (index == path.Length - 1)
+                    {
+                        // trim trailing slashes
+                        path = path.Slice(0, index);
+                        continue;
+                    }
+
+                    return path.Slice(index + 1);
+                }
+
+                if (c == Path.VolumeSeparatorChar)
+                {
+                    return path.Slice(index + 1);
+                }
+            }
+
+            return path;
+        }
+
+        /// <summary>
+        /// Gets the file extension excluding the dot (.) character.
+        /// The method does not check for the path validity.
+        /// If path does not have an extension, empty string is returned.
+        /// </summary>
+        public static ReadOnlySpan<char> GetExtension(ReadOnlySpan<char> path)
+        {
+            for (int index = path.Length - 1; index >= 0; index--)
+            {
+                var c = path[index];
+
+                if (c == '.')
+                {
+                    return path.Slice(index + 1);
+                }
+
+                if (c == DirectorySeparator || c == AltDirectorySeparator || c == Path.VolumeSeparatorChar)
+                {
+                    break;
+                }
+            }
+
+            return ReadOnlySpan<char>.Empty;
+        }
     }
+
+    #endregion
 
     #region FileSystemUtils
 
     /// <summary>
     /// File system utilities.
     /// </summary>
-    public static partial class FileSystemUtils
+    public static class FileSystemUtils
     {
         /// <summary>
         /// Returns the given URL without the username/password information.
@@ -35,18 +119,18 @@ namespace Pchp.Core.Utilities
         {
             if (url == null) return null;
 
-            int url_start = url.LastIndexOf("://");
+            int url_start = url.LastIndexOf("://", StringComparison.Ordinal);
             if (url_start > 0)
             {
                 url_start += "://".Length;
                 int pass_end = url.IndexOf('@', url_start);
                 if (pass_end > url_start)
                 {
-                    StringBuilder sb = new StringBuilder(url.Length);
-                    sb.Append(url.Substring(0, url_start));
+                    var sb = new StringBuilder(url.Length);
+                    sb.Append(url, 0, url_start);
                     sb.Append("...");
-                    sb.Append(url.Substring(pass_end));  // results in: scheme://...@host
-                    return sb.ToString();
+                    sb.Append(url, pass_end, url.Length - pass_end);  // results in: scheme://...@host
+                    url = sb.ToString();
                 }
             }
 
@@ -92,6 +176,160 @@ namespace Pchp.Core.Utilities
         //{
         //    return GetLastModifiedTimeUtc(new FileInfo(path));
         //}
+
+        #region Scheme, Url, Absolute Path
+
+        /// <summary>
+        /// Wrapper-safe method of getting the schema portion from an URL.
+        /// </summary>
+        /// <param name="path">A <see cref="string"/> containing an URL or a local filesystem path.</param>
+        /// <returns>
+        /// The schema portion of the given <paramref name="path"/> or <c>"file"</c>
+        /// for a local filesystem path.
+        /// </returns>
+        /// <exception cref="ArgumentException">Invalid path.</exception>
+        public static string GetScheme(string/*!*/ path)
+        {
+            if (TryGetScheme(path, out var schemespan) && !Path.IsPathRooted(path))
+            {
+                return schemespan.ToString();
+            }
+
+            // When there is not scheme present (or it's a local path) return "file".
+            return "file";
+        }
+
+        /// <summary>
+        /// Wrapper-safe method of getting the schema portion from an URL.
+        /// </summary>
+        /// <param name="path">A <see cref="string"/> containing an URL or a local filesystem path.</param>
+        /// <param name="scheme">Resulting scheme if any.</param>
+        /// <returns>Whether given value contains the scheme.</returns>
+        public static bool TryGetScheme(string path, out ReadOnlySpan<char> scheme) => TryGetScheme(path.AsSpan(), out scheme);
+
+        /// <summary>
+        /// Wrapper-safe method of getting the schema portion from an URL.
+        /// </summary>
+        /// <param name="path">A <see cref="string"/> containing an URL or a local filesystem path.</param>
+        /// <param name="scheme">Resulting scheme if any.</param>
+        /// <returns>Whether given value contains the scheme.</returns>
+        public static bool TryGetScheme(ReadOnlySpan<char> path, out ReadOnlySpan<char> scheme)
+        {
+            if (path.Length > 3)
+            {
+                var colon_index = path.Slice(0, Math.Min(path.Length, 6)).IndexOf(':'); // examine no more than 6 characters
+                if (colon_index > 0 && colon_index < path.Length - 3 && path[colon_index + 1] == '/' && path[colon_index + 2] == '/') // "://"
+                {
+                    scheme = path.Slice(0, colon_index);
+                    return true;
+                }
+            }
+
+            //
+
+            scheme = default;
+            return false;
+        }
+
+        /// <summary>
+        /// Concatenates a scheme with the given absolute path if necessary.
+        /// </summary>
+        /// <param name="absolutePath">Absolute path.</param>
+        /// <returns>The given url or absolute path preceded by a <c>file://</c>.</returns>
+        /// <exception cref="ArgumentException">Invalid path.</exception>
+        public static string GetUrl(string/*!*/ absolutePath)
+        {
+            // Assert that the path is absolute
+            //Debug.Assert(
+            //    !string.IsNullOrEmpty(absolutePath) &&
+            //    (absolutePath.IndexOf(':') > 0 ||   // there is a protocol (http://) or path is rooted (c:\)
+            //        (Path.VolumeSeparatorChar != ':' && // or on linux, if there is no protocol, file path is rooted
+            //            (absolutePath[0] == Path.DirectorySeparatorChar || absolutePath[0] == Path.AltDirectorySeparatorChar)))
+            //    );
+
+            if (Path.IsPathRooted(absolutePath))
+                return String.Concat("file://", absolutePath);
+
+            // Otherwise assume that it's the string before first ':'.
+            return absolutePath;
+        }
+
+        /// <summary>
+        /// Returns the given filesystem url without the scheme.
+        /// </summary>
+        /// <param name="path">A path or url of a local filesystem file.</param>
+        /// <returns>The filesystem path or <b>null</b> if the <paramref name="path"/> is not a local file.</returns>
+        /// <exception cref="ArgumentException">Invalid path.</exception>
+        public static string GetFilename(string/*!*/ path)
+        {
+            if (path.IndexOf(':') == -1 || Path.IsPathRooted(path)) return path;
+            if (path.IndexOf("file://", StringComparison.Ordinal) == 0) return path.Substring("file://".Length);
+            return null;
+        }
+
+        /// <summary>
+        /// Check if the given path is a remote url.
+        /// </summary>
+        /// <param name="url">The path to test.</param>
+        /// <returns><c>true</c> if it's a fully qualified name of a remote resource.</returns>
+        /// <exception cref="ArgumentException">Invalid path.</exception>
+        public static bool IsRemoteFile(string/*!*/ url)
+        {
+            return TryGetScheme(url, out var scheme) && !scheme.SequenceEqual("file".AsSpan()); // has scheme and it is not file
+        }
+
+        /// <summary>
+        /// Check if the given path is a path to a local file.
+        /// </summary>
+        /// <param name="url">The path to test.</param>
+        /// <returns><c>true</c> if it's not a fully qualified name of a remote resource.</returns>
+        /// <exception cref="ArgumentException">Invalid path.</exception>
+        public static bool IsLocalFile(string/*!*/ url)
+        {
+            return !TryGetScheme(url, out var scheme)   // if no scheme provided, file is default
+                || scheme.SequenceEqual("file".AsSpan());
+        }
+
+        /// <summary>
+        /// Merges the path with the current working directory
+        /// to get a canonicalized absolute pathname representing the same path
+        /// (local files only). If the provided <paramref name="path"/>
+        /// is absolute (rooted local path or an URL) it is returned unchanged.
+        /// </summary>
+        /// <param name="ctx">Runtime context.</param>
+        /// <param name="path">An absolute or relative path to a directory or an URL.</param>
+        /// <returns>Canonicalized absolute path in case of a local directory or the original 
+        /// <paramref name="path"/> in case of an URL.</returns>
+        public static string AbsolutePath(Context ctx, string path)
+        {
+            // Don't combine remote file paths with CWD.
+            try
+            {
+                if (IsRemoteFile(path))
+                    return path;
+
+                // Remove the file:// schema if any.
+                path = GetFilename(path);
+
+                // Combine the path and simplify it.
+                string combinedPath = Path.Combine(ctx.WorkingDirectory ?? string.Empty, path);
+
+                // Note: GetFullPath handles "C:" incorrectly
+                if (combinedPath[combinedPath.Length - 1] == ':')
+                {
+                    combinedPath += PathUtils.DirectorySeparator;
+                }
+
+                return Path.GetFullPath(combinedPath);
+            }
+            catch (System.Exception)
+            {
+                PhpException.Throw(PhpError.Notice, string.Format(ErrResources.invalid_path, StripPassword(path)));
+                return null;
+            }
+        }
+
+        #endregion
     }
 
     #endregion

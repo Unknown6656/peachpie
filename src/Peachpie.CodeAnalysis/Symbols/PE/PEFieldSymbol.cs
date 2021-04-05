@@ -21,8 +21,37 @@ namespace Pchp.CodeAnalysis.Symbols
     /// <summary>
     /// The class to represent all fields imported from a PE/module.
     /// </summary>
-    internal sealed class PEFieldSymbol : FieldSymbol
+    internal sealed class PEFieldSymbol : FieldSymbol, IPhpPropertySymbol
     {
+        #region IPhpPropertySymbol
+
+        PhpPropertyKind IPhpPropertySymbol.FieldKind
+        {
+            get
+            {
+                if (IsConst) return PhpPropertyKind.ClassConstant;
+                if (IsStatic) return PhpPropertyKind.AppStaticField;
+
+                if (((IPhpPropertySymbol)this).ContainingStaticsHolder != null)
+                {
+                    if (IsReadOnly) return PhpPropertyKind.ClassConstant;
+                    return PhpPropertyKind.StaticField;
+                }
+
+                return PhpPropertyKind.InstanceField;
+            }
+        }
+
+        TypeSymbol IPhpPropertySymbol.ContainingStaticsHolder => _containingType.IsStaticsContainer() ? _containingType : null;
+
+        bool IPhpPropertySymbol.RequiresContext => false; // not relevant
+
+        TypeSymbol IPhpPropertySymbol.DeclaringType => _containingType.IsStaticsContainer() ? _containingType.ContainingType : _containingType;
+
+        void IPhpPropertySymbol.EmitInit(CodeGen.CodeGenerator cg) { throw new NotSupportedException(); } // not needed
+
+        #endregion
+
         private readonly FieldDefinitionHandle _handle;
         private readonly string _name;
         private readonly FieldAttributes _flags;
@@ -40,6 +69,7 @@ namespace Pchp.CodeAnalysis.Symbols
         private int _lazyFixedSize;
         private NamedTypeSymbol _lazyFixedImplementationType;
         //private PEEventSymbol _associatedEventOpt;
+        private byte _lazyIsPhpHidden;
 
         internal PEFieldSymbol(
             PEModuleSymbol moduleSymbol,
@@ -198,12 +228,11 @@ namespace Pchp.CodeAnalysis.Symbols
             if ((object)_lazyType == null)
             {
                 var moduleSymbol = _containingType.ContainingPEModule;
-                bool isVolatile;
                 ImmutableArray<ModifierInfo<TypeSymbol>> customModifiers;
-                TypeSymbol type = (new MetadataDecoder(moduleSymbol, _containingType)).DecodeFieldSignature(_handle, out isVolatile, out customModifiers);
+                TypeSymbol type = (new MetadataDecoder(moduleSymbol, _containingType)).DecodeFieldSignature(_handle, out customModifiers);
                 ImmutableArray<CustomModifier> customModifiersArray = CSharpCustomModifier.Convert(customModifiers);
                 //type = DynamicTypeDecoder.TransformType(type, customModifiersArray.Length, _handle, moduleSymbol);
-                _lazyIsVolatile = isVolatile;
+                _lazyIsVolatile = customModifiersArray.Any(m => !m.IsOptional && m.Modifier.SpecialType == SpecialType.System_Runtime_CompilerServices_IsVolatile);
 
                 TypeSymbol fixedElementType;
                 int fixedSize;
@@ -312,6 +341,20 @@ namespace Pchp.CodeAnalysis.Symbols
             {
                 EnsureSignatureIsLoaded();
                 return _lazyIsVolatile;
+            }
+        }
+
+        public override bool IsPhpHidden
+        {
+            get
+            {
+                const byte IsPhpHiddenFlag = 2;
+                if (_lazyIsPhpHidden == 0)
+                {
+                    _lazyIsPhpHidden |= Peachpie.CodeAnalysis.Symbols.AttributeHelpers.HasPhpHiddenAttribute(Handle, (PEModuleSymbol)ContainingModule) ? IsPhpHiddenFlag : (byte)0;
+                    _lazyIsPhpHidden |= 1;
+                }
+                return (_lazyIsPhpHidden & IsPhpHiddenFlag) != 0;
             }
         }
 

@@ -1,73 +1,23 @@
-﻿using System;
+﻿using Pchp.Core.Utilities;
+using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Reflection;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace Pchp.Core.Reflection
 {
-    internal static class RoutinesAppContext
-    {
-        public static readonly Dictionary<string, int> NameToIndex = new Dictionary<string, int>();
-        public static readonly List<RoutineInfo> AppRoutines = new List<RoutineInfo>();
-        public static readonly RoutinesTable.RoutinesCount ContextRoutinesCounter = new RoutinesTable.RoutinesCount();
-
-        /// <summary>
-        /// Adds referenced symbol into the map.
-        /// In case of redeclaration, the handle is added to the list.
-        /// </summary>
-        public static void DeclareRoutine(string name, RuntimeMethodHandle handle)
-        {
-            // TODO: W lock
-
-            int index;
-            if (NameToIndex.TryGetValue(name, out index))
-            {
-                Debug.Assert(index != 0);
-
-                if (index > 0)
-                {
-                    throw new InvalidOperationException();
-                }
-
-                ((ClrRoutineInfo)AppRoutines[-index - 1]).AddOverload(handle);
-            }
-            else
-            {
-                index = -AppRoutines.Count - 1;
-                AppRoutines.Add(new ClrRoutineInfo(index, name, handle));
-                NameToIndex[name] = index;
-            }
-        }
-    }
-
     /// <summary>
     /// Runtime table of application PHP functions.
     /// </summary>
-    internal class RoutinesTable
+    [DebuggerNonUserCode]
+    sealed class RoutinesTable
     {
-        public class RoutinesCount
-        {
-            int _count;
-
-            /// <summary>
-            /// Returns new indexes indexed from <c>0</c>.
-            /// </summary>
-            /// <returns></returns>
-            public int GetNewIndex()
-            {
-                lock (this)
-                {
-                    return _count++;
-                }
-            }
-
-            /// <summary>
-            /// Gets count of returned indexes.
-            /// </summary>
-            public int Count => _count;
-        }
+        #region AppContext
 
         /// <summary>
         /// Map of function names to their slot index.
@@ -75,24 +25,76 @@ namespace Pchp.Core.Reflection
         /// Positive number is context-wide function.
         /// Zero is not used.
         /// </summary>
-        readonly Dictionary<string, int> _nameToIndex;
+        static readonly ConcurrentDictionary<string, int> s_nameToIndex = new ConcurrentDictionary<string, int>(StringComparer.InvariantCultureIgnoreCase);
+        static readonly List<ClrRoutineInfo> s_appRoutines = new List<ClrRoutineInfo>(2048);
+        static readonly RoutinesCount s_contextRoutinesCounter = new RoutinesCount();
 
-        readonly List<RoutineInfo> _appRoutines;
+        /// <summary>
+        /// Adds referenced symbol into the map.
+        /// In case of redeclaration, the handle is added to the list.
+        /// </summary>
+        /// <exception cref="PhpFatalErrorException">The routine is already defined as a user routine.</exception>
+        public static ClrRoutineInfo/*!*/DeclareAppRoutine(string name, MethodInfo method)
+        {
+            ClrRoutineInfo routine;
 
-        readonly RoutinesCount _contextRoutinesCounter;
+            if (s_nameToIndex.TryGetValue(name, out var index))
+            {
+                Debug.Assert(index != 0);
+
+                if (index > 0)  // already taken by user routine
+                {
+                    RedeclarationError(name);
+                }
+
+                (routine = s_appRoutines[-index - 1]).AddOverload(method);
+            }
+            else
+            {
+                index = -s_appRoutines.Count - 1;
+                s_appRoutines.Add(routine = new ClrRoutineInfo(index, name, method));
+                s_nameToIndex[name] = index;
+            }
+
+            //
+            return routine;
+        }
+
+        #endregion
+
+        sealed class RoutinesCount
+        {
+            int _count;
+
+            /// <summary>
+            /// Returns new indexes indexed from <c>1</c>.
+            /// </summary>
+            /// <returns></returns>
+            public int GetNewIndex() => Interlocked.Increment(ref _count);
+
+            /// <summary>
+            /// Gets count of returned indexes.
+            /// </summary>
+            public int Count => _count;
+        }
 
         RoutineInfo[] _contextRoutines;
 
-        readonly Action<RoutineInfo> _redeclarationCallback;
-
-        internal RoutinesTable(Dictionary<string, int> nameToIndex, List<RoutineInfo> appRoutines, RoutinesCount counter, Action<RoutineInfo> redeclarationCallback)
+        public RoutinesTable()
         {
-            _nameToIndex = nameToIndex;
-            _appRoutines = appRoutines;
-            _contextRoutinesCounter = counter;
-            _contextRoutines = new RoutineInfo[counter.Count];
-            _redeclarationCallback = redeclarationCallback;
+            _contextRoutines = new RoutineInfo[s_contextRoutinesCounter.Count];
         }
+
+        /// <exception cref="PhpFatalErrorException">The routine is already defined as a user routine.</exception>
+        static void RedeclarationError(string name)
+        {
+            PhpException.Throw(PhpError.Error, Resources.ErrResources.function_redeclared, name);
+        }
+
+        /// <summary>
+        /// Gets enumeration of all routines declared within the context.
+        /// </summary>
+        public IEnumerable<RoutineInfo> EnumerateRoutines() => s_appRoutines.Concat(_contextRoutines.WhereNotNull());
 
         /// <summary>
         /// Declare a user PHP function.
@@ -105,20 +107,15 @@ namespace Pchp.Core.Reflection
             int index = routine.Index;
             if (index == 0)
             {
-                lock (_nameToIndex)
+                index = s_nameToIndex.GetOrAdd(routine.Name, newname =>
                 {
-                    if (_nameToIndex.TryGetValue(routine.Name, out index))
-                    {
-                        if (index < 0)  // redeclaring over an app context function
-                        {
-                            _redeclarationCallback(routine);
-                        }
-                    }
-                    else
-                    {
-                        index = _contextRoutinesCounter.GetNewIndex() + 1;
-                        _nameToIndex[routine.Name] = index;
-                    }
+                    return s_contextRoutinesCounter.GetNewIndex();
+                });
+
+                if (index < 0)
+                {
+                    // redeclaring over app context function
+                    RedeclarationError(routine.Name);
                 }
 
                 //
@@ -130,7 +127,7 @@ namespace Pchp.Core.Reflection
             //
             if (_contextRoutines.Length < index)
             {
-                Array.Resize(ref _contextRoutines, index * 2);                
+                Array.Resize(ref _contextRoutines, index * 2);
             }
 
             DeclarePhpRoutine(ref _contextRoutines[index - 1], routine);
@@ -138,15 +135,15 @@ namespace Pchp.Core.Reflection
 
         void DeclarePhpRoutine(ref RoutineInfo slot, RoutineInfo routine)
         {
-            if (object.ReferenceEquals(slot, null))
+            if (ReferenceEquals(slot, null))
             {
                 slot = routine;
             }
             else
             {
-                if (!object.ReferenceEquals(slot, routine))
+                if (!ReferenceEquals(slot, routine))
                 {
-                    _redeclarationCallback(routine);
+                    RedeclarationError(routine.Name);
                 }
             }
         }
@@ -158,34 +155,40 @@ namespace Pchp.Core.Reflection
         /// <returns><see cref="RoutineInfo"/> instance or <c>null</c> if routine with given name is not declared.</returns>
         public RoutineInfo GetDeclaredRoutine(string name)
         {
-            int index;
-            if (_nameToIndex.TryGetValue(name, out index))
+            if (!string.IsNullOrEmpty(name))
             {
-                if (index > 0)
+                if (name[0] == '\\')
                 {
-                    var routines = _contextRoutines;
-                    if (index <= routines.Length)
-                    {
-                        return routines[index - 1];
-                    }
+                    name = name.Substring(1);
                 }
-                else
+
+                if (s_nameToIndex.TryGetValue(name, out var index))
                 {
                     Debug.Assert(index != 0);
-                    return _appRoutines[-index - 1];
+
+                    if (index > 0)
+                    {
+                        var routines = _contextRoutines;
+                        if (index <= routines.Length)
+                        {
+                            return routines[index - 1];
+                        }
+                    }
+                    else
+                    {
+                        return s_appRoutines[-index - 1];
+                    }
                 }
             }
 
             return null;
         }
 
-        /// <summary>
-        /// Check PHP routine at <paramref name="index"/> is declared.
-        /// </summary>
-        internal bool IsDeclared(int index, RuntimeMethodHandle expected)
+        internal RoutineInfo GetDeclaredRoutine(int ctxslot)
         {
+            Debug.Assert(ctxslot >= 0);
             var routines = _contextRoutines;
-            return index <= routines.Length && ((PhpRoutineInfo)routines[index - 1])?.Handle == expected;
+            return ctxslot <= routines.Length ? routines[ctxslot] : null;
         }
 
         /// <summary>

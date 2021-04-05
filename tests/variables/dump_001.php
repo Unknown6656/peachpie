@@ -1,4 +1,5 @@
 <?php
+namespace variables\dump_001;
 
 function test($x)
 {
@@ -10,6 +11,6 @@ function test($x)
 $a = 123;
 
 test([null, 1, "key" => 1.2, "text", "multiline
-text", true, false, &$a, ["a", "b", "c"], []]);
+text", true, false, &$a, ["a", "b", "c"], [], 'text\with\\backslashes\\\\']);
 
 echo "Done.";

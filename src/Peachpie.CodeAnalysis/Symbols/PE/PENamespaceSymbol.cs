@@ -1,4 +1,5 @@
 ﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.PooledObjects;
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
@@ -43,6 +44,12 @@ namespace Pchp.CodeAnalysis.Symbols
             return ImmutableArray<Symbol>.Empty;
         }
 
+        public override ImmutableArray<Symbol> GetMembersByPhpName(string name)
+        {
+            // return ImmutableArray<Symbol>.Empty; // should not be called, review
+            throw new NotImplementedException();
+        }
+
         public sealed override ImmutableArray<NamedTypeSymbol> GetTypeMembers()
         {
             EnsureAllMembersLoaded();
@@ -75,7 +82,7 @@ namespace Pchp.CodeAnalysis.Symbols
             var result = GetTypeMembers(name);
             if (arity >= 0)
             {
-                result= result.WhereAsArray(type => type.Arity == arity);
+                result = result.WhereAsArray(type => type.Arity == arity);
             }
 
             return result;
@@ -116,7 +123,7 @@ namespace Pchp.CodeAnalysis.Symbols
 
                 var children = ArrayBuilder<NamedTypeSymbol>.GetInstance();
                 var skipCheckForPiaType = !moduleSymbol.Module.ContainsNoPiaLocalTypes();
-               
+
                 foreach (var g in typeGroups)
                 {
                     foreach (var t in g)

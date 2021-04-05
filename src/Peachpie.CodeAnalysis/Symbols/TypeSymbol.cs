@@ -8,17 +8,20 @@ using System.Runtime.CompilerServices;
 using System.Threading;
 using Roslyn.Utilities;
 using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.Symbols;
 
 namespace Pchp.CodeAnalysis.Symbols
 {
     /// <summary>
     /// A TypeSymbol is a base class for all the symbols that represent a type in PHP.
     /// </summary>
-    internal abstract partial class TypeSymbol : NamespaceOrTypeSymbol, ITypeSymbol
+    internal abstract partial class TypeSymbol : NamespaceOrTypeSymbol, ITypeSymbol, ITypeSymbolInternal
     {
         #region ITypeSymbol
 
         public abstract TypeKind TypeKind { get; }
+
+        public virtual bool IsTupleType => false;
 
         INamedTypeSymbol ITypeSymbol.BaseType => BaseType;
 
@@ -28,7 +31,44 @@ namespace Pchp.CodeAnalysis.Symbols
 
         ITypeSymbol ITypeSymbol.OriginalDefinition => (ITypeSymbol)this.OriginalTypeSymbolDefinition;
 
+        bool ITypeSymbol.IsNativeIntegerType => SpecialType == SpecialType.System_IntPtr || SpecialType == SpecialType.System_UIntPtr;
+
+        bool ITypeSymbol.IsRefLikeType => false;
+
+        bool ITypeSymbol.IsUnmanagedType => false;
+
+        bool ITypeSymbol.IsReadOnly => false;
+
+        NullableAnnotation ITypeSymbol.NullableAnnotation => NullableAnnotation.None;
+
+        string ITypeSymbol.ToDisplayString(NullableFlowState topLevelNullability, SymbolDisplayFormat format)
+        {
+            throw new NotImplementedException();
+        }
+
+        ImmutableArray<SymbolDisplayPart> ITypeSymbol.ToDisplayParts(NullableFlowState topLevelNullability, SymbolDisplayFormat format)
+        {
+            throw new NotImplementedException();
+        }
+
+        string ITypeSymbol.ToMinimalDisplayString(SemanticModel semanticModel, NullableFlowState topLevelNullability, int position, SymbolDisplayFormat format)
+        {
+            throw new NotImplementedException();
+        }
+
+        ImmutableArray<SymbolDisplayPart> ITypeSymbol.ToMinimalDisplayParts(SemanticModel semanticModel, NullableFlowState topLevelNullability, int position, SymbolDisplayFormat format)
+        {
+            throw new NotImplementedException();
+        }
+
+        ITypeSymbol ITypeSymbol.WithNullableAnnotation(NullableAnnotation nullableAnnotation)
+        {
+            throw new NotImplementedException();
+        }
+
         #endregion
+
+        ITypeSymbol ITypeSymbolInternal.GetITypeSymbol() => this;
 
         internal NamedTypeSymbol BaseTypeWithDefinitionUseSiteDiagnostics(ref HashSet<DiagnosticInfo> useSiteDiagnostics)
         {
@@ -42,45 +82,78 @@ namespace Pchp.CodeAnalysis.Symbols
             return result;
         }
 
-        public virtual NamedTypeSymbol BaseType
-        {
-            get
-            {
-                return null;
-            }
-        }
+        public virtual NamedTypeSymbol BaseType => null;
 
         public virtual ImmutableArray<NamedTypeSymbol> AllInterfaces
         {
             get
             {
-                if (Interfaces.Length == 0)
+                if (SpecialType == SpecialType.System_Object)
                 {
                     return ImmutableArray<NamedTypeSymbol>.Empty;
                 }
 
-                var result = new HashSet<NamedTypeSymbol>();
-                var todo = new Queue<NamedTypeSymbol>(Interfaces);
-                while (todo.Count != 0)
+                // Adds the type, its base and all interfaces recursively into the set,
+                // checks for cyclic dependency.
+                // Counts unique interfaces (except for the root type).
+                // In case there is just a single array with interfaces in whole hierarchy, returns it directly.
+                void CollectTypes(NamedTypeSymbol type, HashSet<NamedTypeSymbol> resolved, ref int interfaces, ref ImmutableArray<NamedTypeSymbol> onlyinterfaces)
                 {
-                    var t = todo.Dequeue();
-                    if (result.Add(t))
+                    if (type != null && resolved.Add(type))
                     {
-                        t.Interfaces.ForEach(todo.Enqueue);
+                        if (type.IsInterface && resolved.Count != 1) // do not count itself
+                        {
+                            interfaces++;
+                        }
+
+                        var ifaces = type.Interfaces;
+                        if (ifaces.IsDefaultOrEmpty == false)
+                        {
+                            // if interfaces == 0
+                            // TODO: child interfaces might be duplicities, we don't have to drop the array we have
+                            onlyinterfaces = onlyinterfaces.IsDefault ? ifaces : ImmutableArray<NamedTypeSymbol>.Empty; // only if we reach a single array of interfaces in whole hierarchy
+
+                            foreach (var x in ifaces)
+                            {
+                                CollectTypes(x, resolved, ref interfaces, ref onlyinterfaces);
+                            }
+                        }
+
+                        CollectTypes(type.BaseType, resolved, ref interfaces, ref onlyinterfaces);
                     }
                 }
 
-                return result.AsImmutable();
+                var resolved = new HashSet<NamedTypeSymbol>(); // set of types (classes and interfaces) being collected
+                var interfaces = 0;
+                var onlyinterfaces = default(ImmutableArray<NamedTypeSymbol>);
+
+                CollectTypes(this as NamedTypeSymbol, resolved, ref interfaces, ref onlyinterfaces);
+
+                if (interfaces == 0)
+                {
+                    return ImmutableArray<NamedTypeSymbol>.Empty;
+                }
+
+                if (onlyinterfaces.IsDefaultOrEmpty == false) // there is a single array with interfaces
+                {
+                    return onlyinterfaces;
+                }
+
+                //
+                var builder = ImmutableArray.CreateBuilder<NamedTypeSymbol>(interfaces);
+                foreach (var x in resolved)
+                {
+                    if (x != this && x.IsInterface)
+                    {
+                        builder.Add(x);
+                    }
+                }
+
+                return builder.MoveToImmutable();
             }
         }
 
-        public virtual ImmutableArray<NamedTypeSymbol> Interfaces
-        {
-            get
-            {
-                return ImmutableArray<NamedTypeSymbol>.Empty;
-            }
-        }
+        public virtual ImmutableArray<NamedTypeSymbol> Interfaces => ImmutableArray<NamedTypeSymbol>.Empty;
 
         public virtual bool IsAnonymousType => false;
 
@@ -216,7 +289,7 @@ namespace Pchp.CodeAnalysis.Symbols
             return ReferenceEquals(this, t2);
         }
 
-        public sealed override bool Equals(object obj)
+        public override sealed bool Equals(ISymbol obj, SymbolEqualityComparer equalityComparer)
         {
             var t2 = obj as TypeSymbol;
             if ((object)t2 == null) return false;
@@ -273,22 +346,58 @@ namespace Pchp.CodeAnalysis.Symbols
             return null;
         }
 
-        public MethodSymbol[] LookupMethods(string name)
+        /// <summary>
+        /// Resolves PHP method by its name.
+        /// </summary>
+        public List<MethodSymbol> LookupMethods(string name)
         {
-            var set = new HashSet<MethodSymbol>(new SignatureEqualityComparer());
+            if (this.Is_PhpValue())
+            {
+                return new List<MethodSymbol>();
+            }
+
+            TypeSymbol topPhpType = null; // deals with PHP-like overriding, once there is PHP method that override another method (even with a different signature) in a base PHP type
+
+            var set = new HashSet<MethodSymbol>(SignatureEqualityComparer.Instance);
 
             for (var t = this; t != null; t = t.BaseType)
             {
-                set.UnionWith(t.GetMembers(name).OfType<MethodSymbol>());
+                if (topPhpType != null && set.Count != 0 && t.IsPhpType())
+                {
+                    // we already found a method declared in PHP class,
+                    // anything in {t} is treated as overriden:
+                    continue;
+                }
+
+                int count = set.Count;
+
+                foreach (var c in t.GetMembersByPhpName(name))
+                {
+                    if (c is MethodSymbol m) set.Add(m);
+                }
+
+                // remember the top PHP class declaring the method:
+                if (topPhpType == null && count != set.Count && t.IsPhpType()) // some methods were found in PHP type
+                {
+                    topPhpType = t;
+                }
             }
 
-            foreach (var t in this.AllInterfaces)
+            // remove php-hidden methods
+            set.RemoveWhere(m => m.IsPhpHidden); // TODO: other attributes: "private protected", "internal"
+
+            if (set.Count == 0 || (this.IsAbstract && set.All(m => m.IsAbstract))) // abstract or interface, otherwise all methods should be declared on this already
             {
-                set.UnionWith(t.GetMembers(name).OfType<MethodSymbol>());
+                // lookup interface members only if this type is interface or the method is abstract
+
+                foreach (var t in this.AllInterfaces)
+                {
+                    set.UnionWith(t.GetMembersByPhpName(name).OfType<MethodSymbol>());
+                }
             }
 
             //
-            return set.ToArray();
+            return set.ToList();
         }
     }
 }

@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using Microsoft.CodeAnalysis;
 using Roslyn.Utilities;
 using System.Diagnostics;
+using System.Threading;
 
 namespace Pchp.CodeAnalysis.Symbols
 {
@@ -24,16 +25,22 @@ namespace Pchp.CodeAnalysis.Symbols
         /// <summary>
         /// Containing source routine.
         /// </summary>
+        public IMethodSymbol DeclaringMethod => _routine;
         readonly SourceRoutineSymbol _routine;
+
+        public override NamedTypeSymbol ContainingType => base.ContainingType;
 
         /// <summary>
         /// Name of the local variable.
         /// </summary>
+        public string VariableName => _locName;
         readonly string _locName;
 
         /// <summary>
         /// Type of local variable.
+        /// <c>PhpAlias</c> by default.
         /// </summary>
+        public TypeSymbol ValueType => _locType ?? DeclaringCompilation.CoreTypes.PhpAlias;
         readonly TypeSymbol _locType;
 
         public override bool IsImplicitlyDeclared => true;
@@ -55,7 +62,8 @@ namespace Pchp.CodeAnalysis.Symbols
             {
                 if (_valueField == null)
                 {
-                    _valueField = new SynthesizedFieldSymbol(this, _locType, "value", Accessibility.Public, false);
+                    var valueField = new SynthesizedFieldSymbol(this, ValueType, "value", Accessibility.Public, false);
+                    Interlocked.CompareExchange(ref _valueField, valueField, null);
                 }
 
                 return _valueField;
@@ -93,10 +101,9 @@ namespace Pchp.CodeAnalysis.Symbols
         }
         SynthesizedMethodSymbol _initMethod;
 
-        public SynthesizedStaticLocHolder(SourceRoutineSymbol routine, string locName, TypeSymbol locType)
+        public SynthesizedStaticLocHolder(SourceRoutineSymbol routine, string locName, TypeSymbol locType = null)
         {
             Contract.ThrowIfNull(routine);
-            Contract.ThrowIfNull(locType);
 
             _routine = routine;
             _locName = locName ?? "?";
@@ -104,6 +111,10 @@ namespace Pchp.CodeAnalysis.Symbols
         }
 
         public override int Arity => 0;
+
+        internal override bool HasTypeArgumentsCustomModifiers => false;
+
+        public override ImmutableArray<CustomModifier> GetTypeArgumentCustomModifiers(int ordinal) => GetEmptyTypeArgumentCustomModifiers(ordinal);
 
         public override Symbol ContainingSymbol => _routine.ContainingType;
 
@@ -127,15 +138,9 @@ namespace Pchp.CodeAnalysis.Symbols
 
         public override bool IsStatic => false;
 
-        public override ImmutableArray<Location> Locations
-        {
-            get
-            {
-                throw new NotImplementedException();
-            }
-        }
+        public override bool IsSerializable => false;
 
-        public override string Name => _locName + "<>`" + _routine.Name;
+        public override string Name => _routine.MetadataName.Replace('.', '-') + "$" + _locName;
 
         public override TypeKind TypeKind => TypeKind.Class;
 
@@ -171,7 +176,12 @@ namespace Pchp.CodeAnalysis.Symbols
 
         public override ImmutableArray<Symbol> GetMembers(string name)
         {
-            return GetMembers().Where(s => s.Name == name).AsImmutable();
+            return GetMembers().Where(s => s.Name.StringsEqual(name, ignoreCase: false)).AsImmutable();
+        }
+
+        public override ImmutableArray<Symbol> GetMembersByPhpName(string name)
+        {
+            return GetMembers().Where(s => s.Name.StringsEqual(name, ignoreCase: true)).AsImmutable();
         }
 
         public override ImmutableArray<MethodSymbol> Constructors => ImmutableArray.Create((MethodSymbol)_ctor);

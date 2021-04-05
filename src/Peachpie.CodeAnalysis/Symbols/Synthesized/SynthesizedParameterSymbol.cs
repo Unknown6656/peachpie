@@ -1,4 +1,6 @@
 ﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.PooledObjects;
+using Pchp.CodeAnalysis.Semantics;
 using System;
 using System.Collections.Generic;
 using System.Collections.Immutable;
@@ -16,12 +18,18 @@ namespace Pchp.CodeAnalysis.Symbols
     {
         private readonly MethodSymbol _container;
         private readonly TypeSymbol _type;
-        private readonly int _ordinal;
         private readonly string _name;
+        private readonly bool _isParams;
         private readonly ImmutableArray<CustomModifier> _customModifiers;
         private readonly ushort _countOfCustomModifiersPrecedingByRef;
         private readonly RefKind _refKind;
         private readonly ConstantValue _explicitDefaultConstantValue;
+
+        private int _ordinal;
+
+        public override BoundExpression Initializer => null;
+
+        public override FieldSymbol DefaultValueField { get; }
 
         public SynthesizedParameterSymbol(
             MethodSymbol container,
@@ -29,10 +37,13 @@ namespace Pchp.CodeAnalysis.Symbols
             int ordinal,
             RefKind refKind,
             string name = "",
+            bool isParams = false,
             ImmutableArray<CustomModifier> customModifiers = default(ImmutableArray<CustomModifier>),
             ushort countOfCustomModifiersPrecedingByRef = 0,
-            ConstantValue explicitDefaultConstantValue = null)
+            ConstantValue explicitDefaultConstantValue = null,
+            FieldSymbol defaultValueField = null)
         {
+            Debug.Assert(container != null);
             Debug.Assert((object)type != null);
             Debug.Assert(name != null);
             Debug.Assert(ordinal >= 0);
@@ -42,9 +53,67 @@ namespace Pchp.CodeAnalysis.Symbols
             _ordinal = ordinal;
             _refKind = refKind;
             _name = name;
+            _isParams = isParams;
             _customModifiers = customModifiers.NullToEmpty();
             _countOfCustomModifiersPrecedingByRef = countOfCustomModifiersPrecedingByRef;
             _explicitDefaultConstantValue = explicitDefaultConstantValue;
+
+            this.DefaultValueField = defaultValueField;
+        }
+
+        public static SynthesizedParameterSymbol Create(MethodSymbol container, ParameterSymbol p, int? ordinal = default)
+        {
+            var defaultValueField = ((ParameterSymbol)p.OriginalDefinition).DefaultValueField;
+            if (defaultValueField != null && defaultValueField.ContainingType.IsTraitType())
+            {
+                var selfcontainer = container.ContainingType;
+                var fieldcontainer = defaultValueField.ContainingType; // trait
+
+                NamedTypeSymbol newowner;
+
+                if (selfcontainer.IsTraitType())
+                {
+                    // field in a trait must be unbound,
+                    // metadata cannot refer to type parameter
+                    newowner = fieldcontainer.ConstructedFrom.ConstructUnboundGenericType();
+                }
+                else
+                {
+                    // construct the container, map !TSelf
+                    newowner = fieldcontainer.ConstructedFrom.Construct(selfcontainer);
+                }
+
+                //
+                if (newowner != fieldcontainer)
+                {
+                    defaultValueField = defaultValueField.OriginalDefinition.AsMember(newowner);
+                }
+            }
+
+            return new SynthesizedParameterSymbol(container, p.Type, ordinal.HasValue ? ordinal.Value : p.Ordinal, p.RefKind,
+                name: p.Name,
+                isParams: p.IsParams,
+                explicitDefaultConstantValue: p.ExplicitDefaultConstantValue,
+                defaultValueField: defaultValueField);
+        }
+
+        public static ImmutableArray<ParameterSymbol> Create(MethodSymbol container, ImmutableArray<ParameterSymbol> srcparams)
+        {
+            if (srcparams.Length != 0)
+            {
+                var builder = ImmutableArray.CreateBuilder<ParameterSymbol>(srcparams.Length);
+
+                foreach (var p in srcparams)
+                {
+                    builder.Add(Create(container, p));
+                }
+
+                return builder.MoveToImmutable();
+            }
+            else
+            {
+                return ImmutableArray<ParameterSymbol>.Empty;
+            }
         }
 
         internal override TypeSymbol Type
@@ -82,15 +151,30 @@ namespace Pchp.CodeAnalysis.Symbols
             get { return _customModifiers; }
         }
 
-        public override int Ordinal
+        internal override IEnumerable<AttributeData> GetCustomAttributesToEmit(CommonModuleCompilationState compilationState)
         {
-            get { return _ordinal; }
+            // params
+            if (IsParams)
+            {
+                yield return DeclaringCompilation.CreateParamsAttribute();
+            }
+
+            // TODO: preserve [NotNull]
+
+            // [DefaultValue]
+            if (DefaultValueField != null)
+            {
+                yield return DeclaringCompilation.CreateDefaultValueAttribute(ContainingType, DefaultValueField);
+            }
+
+            //
+            yield break;
         }
 
-        public override bool IsParams
-        {
-            get { return false; }
-        }
+        public override int Ordinal => _ordinal;
+        internal void UpdateOrdinal(int newordinal) { _ordinal = newordinal; }
+
+        public override bool IsParams => _isParams;
 
         //internal override bool IsMetadataOptional
         //{
@@ -99,7 +183,17 @@ namespace Pchp.CodeAnalysis.Symbols
 
         public override bool IsImplicitlyDeclared
         {
-            get { return SpecialParameterSymbol.IsContextParameter(this) || base.IsImplicitlyDeclared; }
+            get
+            {
+                return
+                    SpecialParameterSymbol.IsContextParameter(this) ||
+                    SpecialParameterSymbol.IsImportValueParameter(this) ||
+                    SpecialParameterSymbol.IsDummyFieldsOnlyCtorParameter(this) ||
+                    SpecialParameterSymbol.IsLateStaticParameter(this) ||
+                    SpecialParameterSymbol.IsSelfParameter(this) ||
+                    this.IsParams ||
+                    base.IsImplicitlyDeclared;
+            }
         }
 
         internal override ConstantValue ExplicitDefaultConstantValue => _explicitDefaultConstantValue;
@@ -139,11 +233,6 @@ namespace Pchp.CodeAnalysis.Symbols
         public override Symbol ContainingSymbol
         {
             get { return _container; }
-        }
-
-        public override ImmutableArray<Location> Locations
-        {
-            get { return ImmutableArray<Location>.Empty; }
         }
 
         public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences
@@ -187,7 +276,7 @@ namespace Pchp.CodeAnalysis.Symbols
             {
                 //same properties as the old one, just change the owner
                 builder.Add(new SynthesizedParameterSymbol(destinationMethod, oldParam.Type, oldParam.Ordinal,
-                    oldParam.RefKind, oldParam.Name, oldParam.CustomModifiers, oldParam.CountOfCustomModifiersPrecedingByRef));
+                    oldParam.RefKind, oldParam.Name, false, oldParam.CustomModifiers, oldParam.CountOfCustomModifiersPrecedingByRef));
             }
 
             return builder.ToImmutableAndFree();

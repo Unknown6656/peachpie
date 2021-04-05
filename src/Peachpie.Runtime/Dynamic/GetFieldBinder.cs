@@ -1,92 +1,92 @@
-﻿using Pchp.Core.Reflection;
-using System;
-using System.Collections.Generic;
+﻿using System;
 using System.Diagnostics;
 using System.Dynamic;
-using System.Linq;
 using System.Linq.Expressions;
-using System.Reflection;
-using System.Text;
-using System.Threading.Tasks;
+using Pchp.CodeAnalysis.Semantics;
+using Pchp.Core.Reflection;
 
 namespace Pchp.Core.Dynamic
 {
-    public class GetFieldBinder : DynamicMetaObjectBinder
+    class GetFieldBinder : DynamicMetaObjectBinder
     {
         readonly string _name;
         readonly Type _classContext;
         readonly Type _returnType;
-        readonly AccessFlags _access;
+        readonly AccessMask _access;
 
-        public GetFieldBinder(string name, RuntimeTypeHandle classContext, RuntimeTypeHandle returnType, AccessFlags access)
+        protected virtual bool IsClassConst => false;
+
+        public GetFieldBinder(string name, RuntimeTypeHandle classContext, RuntimeTypeHandle returnType, AccessMask access)
         {
             _name = name;
             _returnType = Type.GetTypeFromHandle(returnType); // should correspond to AccessFlags
             _classContext = Type.GetTypeFromHandle(classContext);
-            _access = access;
-        }
-
-        string ResolveName(DynamicMetaObject[] args, ref BindingRestrictions restrictions)
-        {
-            if (_name != null)
-            {
-                return _name;
-            }
-            else
-            {
-                Debug.Assert(args.Length >= 1 && args[0].LimitType == typeof(string));
-                restrictions = restrictions.Merge(BindingRestrictions.GetExpressionRestriction(Expression.Equal(args[0].Expression, Expression.Constant(args[0].Value)))); // args[0] == "VALUE"
-                return (string)args[0].Value;
-            }
+            _access = access & (~AccessMask.WriteMask); // Read|Write => Read
         }
 
         public override DynamicMetaObject Bind(DynamicMetaObject target, DynamicMetaObject[] args)
         {
-            var restrictions = BindingRestrictions.Empty;
+            bool hasTargetInstance = (target.LimitType != typeof(TargetTypeParam));
 
-            PhpTypeInfo phptype;
-            Expression target_expr;
-
-            //
-            var fldName = ResolveName(args, ref restrictions);
-
-            //
-            if (target.LimitType == typeof(PhpTypeInfo))    // static field
+            var bound = new CallSiteContext(!hasTargetInstance)
             {
-                target_expr = null;
-                phptype = (PhpTypeInfo)target.Value;
-
-                // 
-                restrictions = restrictions.Merge(BindingRestrictions.GetInstanceRestriction(target.Expression, target_expr));
+                ClassContext = _classContext,
+                Name = _name
             }
-            else
+            .ProcessArgs(target, args, hasTargetInstance);
+
+            if (hasTargetInstance)
             {
-                // instance field
-                object target_value;
-                BinderHelpers.TargetAsObject(target, out target_expr, out target_value, ref restrictions);
-
-                var runtime_type = target_value.GetType();
-
-                //
-                if (target_expr.Type != runtime_type)
+                var isobject = bound.TargetType != null;
+                if (isobject == false)
                 {
-                    restrictions = restrictions.Merge(BindingRestrictions.GetTypeRestriction(target_expr, runtime_type));
-                    target_expr = Expression.Convert(target_expr, runtime_type);
+                    var defaultexpr = ConvertExpression.BindDefault(_returnType);
+
+                    if (!_access.Quiet())
+                    {
+                        // PhpException.VariableMisusedAsObject(target, _access.ReadRef)
+                        var throwcall = BinderHelpers.VariableMisusedAsObject(target.Expression, _access.EnsureAlias());
+                        defaultexpr = Expression.Block(throwcall, defaultexpr);
+                    }
+
+                    return new DynamicMetaObject(defaultexpr, bound.Restrictions);
                 }
 
-                phptype = runtime_type.GetPhpTypeInfo();
+                // instance := (T)instance
+                bound.TargetInstance = Expression.Convert(bound.TargetInstance, bound.TargetType.Type);
             }
 
+            Debug.Assert(IsClassConst ? (bound.TargetInstance == null) : true);
+
             //
-            var getter = BinderHelpers.BindField(phptype, _classContext, target_expr, fldName, null, _access, null);
+            var getter = IsClassConst
+                ? BinderHelpers.BindClassConstant(bound.TargetType, bound.ClassContext, bound.Name, bound.Context)
+                : BinderHelpers.BindField(bound.TargetType, bound.ClassContext, bound.TargetInstance, bound.Name, bound.Context, _access, null);
+
             if (getter != null)
             {
                 //
-                return new DynamicMetaObject(ConvertExpression.Bind(getter, _returnType), restrictions);
+                return new DynamicMetaObject(ConvertExpression.Bind(getter, _returnType, bound.Context), bound.Restrictions);
             }
 
-            // field not found
-            throw new NotImplementedException();
+            if (IsClassConst)
+            {
+                // error: constant not defined
+                // ...
+            }
+
+            // unreachable: property not found
+            throw new InvalidOperationException($"{bound.TargetType.Name}::{bound.Name} could not be resolved.");
         }
+    }
+
+    class GetClassConstBinder : GetFieldBinder
+    {
+        public GetClassConstBinder(string name, RuntimeTypeHandle classContext, RuntimeTypeHandle returnType, AccessMask access)
+            : base(name, classContext, returnType, access)
+        {
+        }
+
+        protected override bool IsClassConst => true;
     }
 }

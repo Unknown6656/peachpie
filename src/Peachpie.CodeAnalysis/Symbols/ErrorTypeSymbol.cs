@@ -25,6 +25,10 @@ namespace Pchp.CodeAnalysis.Symbols
 
         public override int Arity => 0;
 
+        internal override bool HasTypeArgumentsCustomModifiers => false;
+
+        public override ImmutableArray<CustomModifier> GetTypeArgumentCustomModifiers(int ordinal) => GetEmptyTypeArgumentCustomModifiers(ordinal);
+
         public override TypeKind TypeKind => TypeKind.Error;
 
         public override SymbolKind Kind => SymbolKind.ErrorType;
@@ -54,8 +58,6 @@ namespace Pchp.CodeAnalysis.Symbols
 
         public override Symbol ContainingSymbol => null;
 
-        public override ImmutableArray<Location> Locations => ImmutableArray<Location>.Empty;
-
         public override ImmutableArray<SyntaxReference> DeclaringSyntaxReferences => ImmutableArray<SyntaxReference>.Empty;
 
         public override bool IsStatic => false;
@@ -63,6 +65,8 @@ namespace Pchp.CodeAnalysis.Symbols
         public override bool IsAbstract => false;
 
         public override bool IsSealed => false;
+
+        public override bool IsSerializable => false;
 
         internal override bool IsInterface => false;
 
@@ -80,6 +84,8 @@ namespace Pchp.CodeAnalysis.Symbols
         public override ImmutableArray<Symbol> GetMembers() => ImmutableArray<Symbol>.Empty;
 
         public override ImmutableArray<Symbol> GetMembers(string name) => ImmutableArray<Symbol>.Empty;
+
+        public override ImmutableArray<Symbol> GetMembersByPhpName(string name) => ImmutableArray<Symbol>.Empty;
 
         public override ImmutableArray<NamedTypeSymbol> GetTypeMembers() => ImmutableArray<NamedTypeSymbol>.Empty;
 
@@ -108,6 +114,70 @@ namespace Pchp.CodeAnalysis.Symbols
 
     internal class MissingMetadataTypeSymbol : ErrorTypeSymbol
     {
+        /// <summary>
+        /// Represents nested missing type.
+        /// </summary>
+        internal class Nested : MissingMetadataTypeSymbol
+        {
+            private readonly NamedTypeSymbol _containingType;
+
+            public Nested(NamedTypeSymbol containingType, string name, int arity, bool mangleName)
+                : base(name, arity, mangleName)
+            {
+                Debug.Assert((object)containingType != null);
+
+                _containingType = containingType;
+            }
+
+            public Nested(NamedTypeSymbol containingType, ref MetadataTypeName emittedName)
+                : this(containingType, ref emittedName, emittedName.ForcedArity == -1 || emittedName.ForcedArity == emittedName.InferredArity)
+            {
+            }
+
+            private Nested(NamedTypeSymbol containingType, ref MetadataTypeName emittedName, bool mangleName)
+                : this(containingType,
+                       mangleName ? emittedName.UnmangledTypeName : emittedName.TypeName,
+                       mangleName ? emittedName.InferredArity : emittedName.ForcedArity,
+                       mangleName)
+            {
+            }
+
+            public override Symbol ContainingSymbol
+            {
+                get
+                {
+                    return _containingType;
+                }
+            }
+
+
+            public override SpecialType SpecialType
+            {
+                get
+                {
+                    return SpecialType.None; // do not have nested types among CORE types yet.
+                }
+            }
+
+            public override int GetHashCode()
+            {
+                return Hash.Combine(_containingType, Hash.Combine(MetadataName, _arity));
+            }
+
+            internal override bool Equals(TypeSymbol t2, bool ignoreCustomModifiersAndArraySizesAndLowerBounds = false, bool ignoreDynamic = false)
+            {
+                if (ReferenceEquals(this, t2))
+                {
+                    return true;
+                }
+
+                var other = t2 as Nested;
+                return (object)other != null && string.Equals(MetadataName, other.MetadataName, StringComparison.Ordinal) &&
+                    _arity == other._arity &&
+                    _containingType.Equals(other._containingType, ignoreCustomModifiersAndArraySizesAndLowerBounds, ignoreDynamic);
+            }
+        }
+
         protected readonly string _name;
         protected readonly int _arity;
         protected readonly bool _mangleName;
@@ -126,5 +196,23 @@ namespace Pchp.CodeAnalysis.Symbols
         public override string Name => _name;
         internal override bool MangleName => _mangleName;
         public override int Arity => _arity;
+    }
+
+    internal sealed class AmbiguousErrorTypeSymbol : ErrorTypeSymbol
+    {
+        internal ImmutableArray<NamedTypeSymbol> _candidates;
+
+        public AmbiguousErrorTypeSymbol(ImmutableArray<NamedTypeSymbol> candidates)
+        {
+            Debug.Assert(!candidates.IsDefaultOrEmpty);
+            _candidates = candidates;
+        }
+
+        public override CandidateReason CandidateReason => CandidateReason.Ambiguous;
+        public override ImmutableArray<ISymbol> CandidateSymbols => _candidates.CastArray<ISymbol>();
+
+        public override string Name => _candidates[0].Name;
+        internal override bool MangleName => _candidates[0].MangleName;
+        public override int Arity => 0;
     }
 }

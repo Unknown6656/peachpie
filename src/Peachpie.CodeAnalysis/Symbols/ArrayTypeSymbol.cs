@@ -1,4 +1,5 @@
 ﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.PooledObjects;
 using Roslyn.Utilities;
 using System;
 using System.Collections.Generic;
@@ -18,6 +19,8 @@ namespace Pchp.CodeAnalysis.Symbols
         private readonly TypeSymbol _elementType;
         private readonly NamedTypeSymbol _baseType;
         private readonly ImmutableArray<CustomModifier> _customModifiers;
+
+        public override NamedTypeSymbol BaseType => _baseType;
 
         private ArrayTypeSymbol(
             TypeSymbol elementType,
@@ -255,6 +258,11 @@ namespace Pchp.CodeAnalysis.Symbols
             return ImmutableArray<Symbol>.Empty;
         }
 
+        public override ImmutableArray<Symbol> GetMembersByPhpName(string name)
+        {
+            return ImmutableArray<Symbol>.Empty;
+        }
+
         public override ImmutableArray<NamedTypeSymbol> GetTypeMembers()
         {
             return ImmutableArray<NamedTypeSymbol>.Empty;
@@ -291,14 +299,6 @@ namespace Pchp.CodeAnalysis.Symbols
             get
             {
                 return null;
-            }
-        }
-
-        public override ImmutableArray<Location> Locations
-        {
-            get
-            {
-                return ImmutableArray<Location>.Empty;
             }
         }
 
@@ -457,8 +457,16 @@ namespace Pchp.CodeAnalysis.Symbols
 
         bool IArrayTypeSymbol.Equals(IArrayTypeSymbol symbol)
         {
-            return this.Equals(symbol as ArrayTypeSymbol);
+            return this.Equals(symbol as ArrayTypeSymbol, SymbolEqualityComparer.Default);
         }
+
+        bool IArrayTypeSymbol.IsSZArray => IsSZArray;
+
+        ImmutableArray<int> IArrayTypeSymbol.LowerBounds => LowerBounds;
+
+        ImmutableArray<int> IArrayTypeSymbol.Sizes => Sizes;
+
+        NullableAnnotation IArrayTypeSymbol.ElementNullableAnnotation => NullableAnnotation.None;
 
         #endregion
 

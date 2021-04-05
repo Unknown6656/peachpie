@@ -339,9 +339,6 @@
   <data name="class_has_no_unserializer" xml:space="preserve">
     <value>Class {0} has no unserializer</value>
   </data>
-  <data name="invalid_script_assembly" xml:space="preserve">
-    <value>The assembly '{0}' is not a valid Phalanger compiled script assembly</value>
-  </data>
   <data name="unable_to_resolve_script_type" xml:space="preserve">
     <value>Unable to resolve script type (source path '{0}', referential type '{1}')</value>
   </data>
@@ -368,9 +365,6 @@
   </data>
   <data name="invalid_dynamic_wrapper_format" xml:space="preserve">
     <value>Invalid format of dynamic wrapper '{0}'.</value>
-  </data>
-  <data name="invalid_class_library" xml:space="preserve">
-    <value>The library '{0}' is not a valid Phalanger Class Library.</value>
   </data>
   <data name="invalid_class_library_wrapper" xml:space="preserve">
     <value>The dynamic wrapper for the library, file '{0}', is invalid. Delete the wrapper file so that it could be regenerated automatically during the next request.</value>
@@ -504,16 +498,6 @@ Additional information:
   <data name="default_exception_message" xml:space="preserve">
     <value>Unknown exception</value>
   </data>
-  <data name="stringified_exception_debug" xml:space="preserve">
-    <value>exception '{0}' with message '{1}' in {2}:{3}:{4}
-Stack trace:
-{5}</value>
-  </data>
-  <data name="stringified_exception" xml:space="preserve">
-    <value>exception '{0}' with message '{1}'
-Stack trace:
-{2}</value>
-  </data>
   <data name="getiterator_must_return_traversable" xml:space="preserve">
     <value>Objects returned by {0}::getIterator() must be traversable or implement interface Iterator</value>
   </data>
@@ -539,7 +523,7 @@ Stack trace:
     <value>Creating default object from empty value</value>
   </data>
   <data name="undefined_method_called" xml:space="preserve">
-    <value>Call to undefined method: {0}::{1}()</value>
+    <value>Call to undefined method {0}::{1}()</value>
   </data>
   <data name="protected_method_called" xml:space="preserve">
     <value>Call to protected method {0}::{1}() from context '{2}'</value>
@@ -734,7 +718,7 @@ Stack trace:
     <value>Use of undefined constant {0} - assumed '{0}'</value>
   </data>
   <data name="object_used_as_array" xml:space="preserve">
-    <value>An object of type '{0}' used as an array</value>
+    <value>Cannot use object of type {0} as array</value>
   </data>
   <data name="string_used_as_array" xml:space="preserve">
     <value>A string used as an array</value>
@@ -773,7 +757,7 @@ Stack trace:
     <value>Function is not supported</value>
   </data>
   <data name="undefined_function_called" xml:space="preserve">
-    <value>Call to undefined function: '{0}'</value>
+    <value>Call to undefined function {0}()</value>
   </data>
   <data name="undefined_external_function_called" xml:space="preserve">
     <value>Call to undefined external function '{0}', extension '{1}' - check configuration</value>
@@ -950,7 +934,7 @@ Stack trace:
     <value>Unable to open {0} for writing</value>
   </data>
   <data name="ambiguous_file_mode" xml:space="preserve">
-    <value>Ambiguous file access mode (binary mode assumed). Specify either '{0}b' or '{0}t' or set Phalanger configuration option DefaultFileOpenMode in file-system section of .config file.</value>
+    <value>Ambiguous file access mode (binary mode assumed). Specify either '{0}b' or '{0}t' or set configuration option DefaultFileOpenMode.</value>
   </data>
   <data name="empty_file_mode" xml:space="preserve">
     <value>Supplied file access mode is empty</value>
@@ -1262,9 +1246,6 @@ Stack trace:
   </data>
   <data name="interface_bodyful_method" xml:space="preserve">
     <value>Interface method {0}::{1}() cannot contain body</value>
-  </data>
-  <data name="abstract_method_name_not_matching_implementation" xml:space="preserve">
-    <value>Names of the abstract method {0}::{1}() and its implementation {2}::{3}() must be the same (case sensitively) in the current version of Phalanger</value>
   </data>
   <data name="conflicting_type_aliases" xml:space="preserve">
     <value>Type '{0}' has already been imported</value>
@@ -1646,5 +1627,26 @@ Stack trace:
   </data>
   <data name="try_without_catch_or_finally" xml:space="preserve">
     <value>Cannot use try without catch or finally</value>
+  </data>
+  <data name="trait_instantiated" xml:space="preserve">
+    <value>Cannot instantiate trait {0}</value>
+  </data>
+  <data name="uncloneable_cloned" xml:space="preserve">
+    <value>Trying to clone an uncloneable object of class {0}</value>
+  </data>
+  <data name="argument_not_callable" xml:space="preserve">
+    <value>Argument {0} must be callable, {1} given</value>
+  </data>
+  <data name="next_array_key_unavailable" xml:space="preserve">
+    <value>Cannot add element to the array as the next element is already occupied</value>
+  </data>
+  <data name="invalid_socket_resource" xml:space="preserve">
+    <value>Supplied resource is not a valid 'stream' resource</value>
+  </data>
+  <data name="cannot_create_closure_from_callable" xml:space="preserve">
+    <value>Failed to create closure from callable</value>
+  </data>
+  <data name="too_few_arguments" xml:space="preserve">
+    <value>Too few arguments to function {0}(), {1} passed and at least {2} expected</value>
   </data>
 </root>

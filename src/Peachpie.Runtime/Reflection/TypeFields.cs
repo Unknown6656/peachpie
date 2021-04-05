@@ -19,220 +19,109 @@ namespace Pchp.Core.Reflection
         #region Fields
 
         /// <summary>
-        /// Declared fields.
-        /// </summary>
-        readonly Dictionary<string, FieldInfo> _fields;
-
-        /// <summary>
         /// Declared properties.
+        /// Cannot be <c>null</c>.
         /// </summary>
-        readonly Dictionary<string, PropertyInfo> _properties;
-
-        /// <summary>
-        /// Declared fields in <c>__statics</c> nested class.
-        /// </summary>
-        readonly Dictionary<string, FieldInfo> _staticsFields;
-
-        /// <summary>
-        /// Lazily initialized function getting <c>_statics</c> in given runtime <see cref="Context"/>.
-        /// </summary>
-        Func<Context, object> _staticsGetter;
+        readonly IReadOnlyDictionary<string, PhpPropertyInfo> _properties;
 
         #endregion
 
         #region Initialization
 
-        internal TypeFields(Type type)
+        internal TypeFields(TypeInfo tinfo)
         {
-            var tinfo = type.GetTypeInfo();
+            var t = tinfo.GetPhpTypeInfo();
+            var properties = new Dictionary<string, PhpPropertyInfo>();
 
-            _fields = tinfo.DeclaredFields.Where(_IsAllowedField).ToDictionary(_FieldName, StringComparer.Ordinal);
-            if (_fields.Count == 0)
-                _fields = null;
+            foreach (var field in tinfo.DeclaredFields.Where(s_isAllowedField))
+            {
+                properties[field.Name] = new PhpPropertyInfo.ClrFieldProperty(t, field);
+            }
 
             var staticscontainer = tinfo.GetDeclaredNestedType("_statics");
             if (staticscontainer != null)
             {
-                _staticsFields = staticscontainer.DeclaredFields.ToDictionary(_FieldName, StringComparer.Ordinal);
+                if (staticscontainer.IsGenericTypeDefinition)
+                {
+                    // _statics is always generic type definition (not constructed) in case enclosing type is generic.
+                    // Construct the type using enclosing class (trait) generic arguments (TSelf):
+                    Debug.Assert(tinfo.GenericTypeArguments.Length == staticscontainer.GenericTypeParameters.Length);   // <!TSelf>
+                    staticscontainer = staticscontainer.MakeGenericType(tinfo.GenericTypeArguments).GetTypeInfo();
+                }
+
+                foreach (var field in staticscontainer.DeclaredFields.Where(s_isAllowedField))
+                {
+                    properties[field.Name] = new PhpPropertyInfo.ContainedClrField(t, field);
+                }
             }
 
-            _properties = tinfo.DeclaredProperties.ToDictionary(_PropertyName, StringComparer.Ordinal);
-            if (_properties.Count == 0)
-                _properties = null;
-        }
-
-        Func<Context, object> EnsureStaticsGetter(Type type)
-        {
-            var getter = _staticsGetter;
-            if (getter == null)
+            foreach (var prop in tinfo.DeclaredProperties.Where(s_isAllowedProperty))
             {
-                _staticsGetter = getter = CreateStaticsGetter(type);
+                properties[prop.Name] = new PhpPropertyInfo.ClrProperty(t, prop);
             }
 
             //
-            return getter;
+            _properties = properties.Count != 0 ? properties : EmptyDictionary<string, PhpPropertyInfo>.Singleton;
         }
 
-        static Func<FieldInfo, bool> _IsAllowedField = f => ReflectionUtils.IsAllowedPhpName(f.Name) && !ReflectionUtils.IsRuntimeFields(f);
-        static Func<FieldInfo, string> _FieldName = f => f.Name;
-        static Func<PropertyInfo, string> _PropertyName = p => p.Name;
+        static readonly Func<PhpPropertyInfo, bool> s_isInstanceProperty = p => !p.IsStatic;
 
-        static Func<Context, object> CreateStaticsGetter(Type _statics)
+        static readonly Func<FieldInfo, bool> s_isAllowedField = f =>
         {
-            Debug.Assert(_statics.Name == "_statics");
-            Debug.Assert(_statics.IsNested);
+            var access = f.Attributes & FieldAttributes.FieldAccessMask;
+            return
+                access != FieldAttributes.Assembly &&
+                access != FieldAttributes.FamANDAssem &&
+                ReflectionUtils.IsAllowedPhpName(f.Name) &&
+                !ReflectionUtils.IsRuntimeFields(f) &&
+                !ReflectionUtils.IsContextField(f) &&
+                !f.IsPhpHidden() &&
+                !f.FieldType.IsPointer;
+        };
 
-            var getter = BinderHelpers.GetStatic_T_Method(_statics);    // ~ Context.GetStatics<_statics>, in closure
-            // TODO: getter.CreateDelegate
-            return ctx => getter.Invoke(ctx, ArrayUtils.EmptyObjects);
-        }
+        static readonly Func<PropertyInfo, bool> s_isAllowedProperty = p =>
+        {
+            var getter = p.GetMethod;
+            if (getter != null)
+            {
+                var access = getter.Attributes & MethodAttributes.MemberAccessMask;
+                if (access == MethodAttributes.Assembly || access == MethodAttributes.FamANDAssem)
+                {
+                    return false;
+                }
+
+                if (ReflectionUtils.IsAllowedPhpName(p.Name) &&
+                    p.GetIndexParameters().Length == 0 &&
+                    !p.IsPhpHidden())
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        };
 
         #endregion
 
         /// <summary>
-        /// Gets value indicating the class contains a field with specified name.
+        /// Gets enumeration of class instance fields excluding eventual <c>__runtime_fields</c>.
         /// </summary>
-        public FieldKind HasField(string name)
-        {
-            FieldInfo fld;
-
-            //
-            if (_fields != null && _fields.TryGetValue(name, out fld))
-            {
-                if (fld.IsPublic && fld.IsLiteral) return FieldKind.Constant;
-
-                if (fld.IsStatic) return FieldKind.StaticField;
-
-                return FieldKind.InstanceField;
-            }
-
-            //
-            if (_staticsFields != null && _staticsFields.TryGetValue(name, out fld))
-            {
-                return fld.IsInitOnly ? FieldKind.Constant : FieldKind.StaticField;
-            }
-
-            //
-            PropertyInfo p;
-            if (_properties != null && _properties.TryGetValue(name, out p))
-            {
-                return p.GetMethod.IsStatic ? FieldKind.StaticField : FieldKind.InstanceField;
-            }
-
-            //
-            return FieldKind.Undefined;
-        }
+        public IEnumerable<PhpPropertyInfo> InstanceProperties => _properties.Values.Where(s_isInstanceProperty);
 
         /// <summary>
-        /// Resolves a constant value in given context.
+        /// Enumerates all the properties in the class excluding runtime fields.
         /// </summary>
-        public object GetConstantValue(string name, Context ctx)
-        {
-            if (ctx == null)
-            {
-                throw new ArgumentNullException("ctx");
-            }
-
-            FieldInfo fld;
-
-            // fields
-            if (_fields != null && _fields.TryGetValue(name, out fld))
-            {
-                if (fld.IsPublic && fld.IsLiteral)
-                {
-                    return fld.GetValue(null);
-                }
-            }
-
-            // __statics.fields
-            if (_staticsFields != null && _staticsFields.TryGetValue(name, out fld))
-            {
-                if (fld.IsPublic && fld.IsInitOnly)
-                {
-                    return fld.GetValue(EnsureStaticsGetter(fld.DeclaringType)(ctx));  // Context.GetStatics<_statics>().FIELD
-                }
-            }
-
-            throw new ArgumentException();
-        }
-
-        public enum FieldKind
-        {
-            Undefined,
-
-            InstanceField,
-            StaticField,
-            Constant,
-        }
+        public IEnumerable<PhpPropertyInfo> Properties => _properties.Values;
 
         /// <summary>
-        /// Gets <see cref="Expression"/> representing field value.
+        /// Obtains the PHP property descriptor matching given name.
+        /// The result may be an instance field, static field, CLR property, class constant or <c>null</c>.
         /// </summary>
-        /// <param name="name">Class constant name.</param>
-        /// <param name="classCtx">Current class context. Can be <c>null</c>.</param>
-        /// <param name="target">Expression representing self instance.</param>
-        /// <param name="ctx">Expression representing current <see cref="Context"/>.</param>
-        /// <param name="kind">Field kind.</param>
-        /// <returns><see cref="Expression"/> instance or <c>null</c> if constant does not exist.</returns>
-        internal Expression Bind(string name, Type classCtx, Expression target, Expression ctx, FieldKind kind)
-        {
-            FieldInfo fld;
-
-            //
-            if (_fields != null && _fields.TryGetValue(name, out fld))
-            {
-                if (fld.IsPublic && fld.IsLiteral)
-                {
-                    if (kind == FieldKind.Constant)
-                    {
-                        return Expression.Constant(fld.GetValue(null));
-                    }
-                }
-
-                if (fld.IsStatic)
-                {
-                    if (kind == FieldKind.StaticField)
-                    {
-                        return Expression.Field(null, fld);
-                    }
-                }
-
-                if (kind == FieldKind.InstanceField)
-                {
-                    Debug.Assert(target != null);
-                    return Expression.Field(target, fld);
-                }
-            }
-
-            //
-            if (kind != FieldKind.InstanceField && _staticsFields != null && _staticsFields.TryGetValue(name, out fld))
-            {
-                if ((kind == FieldKind.Constant && fld.IsInitOnly) ||
-                    (kind == FieldKind.StaticField))
-                {
-                    Debug.Assert(target == null);
-                    Debug.Assert(ctx != null);
-
-                    // Context.GetStatics<_statics>().FIELD
-                    var getstatics = BinderHelpers.GetStatic_T_Method(fld.DeclaringType);
-                    return Expression.Field(Expression.Call(ctx, getstatics), fld);
-                }
-            }
-
-            //
-            PropertyInfo p;
-            if (kind != FieldKind.Constant && _properties != null && _properties.TryGetValue(name, out p))
-            {
-                var isstatic = p.GetMethod.IsStatic;
-                if ((kind == FieldKind.StaticField) == isstatic)
-                {
-                    Debug.Assert(isstatic ? target == null : target != null);
-                    return Expression.Property(target, p);
-                }
-            }
-
-            //
-            return null;
-        }
+        /// <returns>
+        /// Instance of <see cref="PhpPropertyInfo"/> describing the property/field/constant.
+        /// Can be <c>null</c> if specified property is not declared on current type.
+        /// </returns>
+        /// <remarks>The method return <c>null</c> in case the property is a runtime property. This case has to be handled separately.</remarks>
+        public PhpPropertyInfo TryGetPhpProperty(string name) => _properties.TryGetValue(name, out var p) ? p : null;
     }
 }

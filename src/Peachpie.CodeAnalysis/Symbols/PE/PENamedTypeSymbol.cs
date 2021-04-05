@@ -1,4 +1,5 @@
 ﻿using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.PooledObjects;
 using Roslyn.Utilities;
 using System;
 using System.Collections.Generic;
@@ -12,55 +13,71 @@ using System.Collections.Immutable;
 using Microsoft.CodeAnalysis.Collections;
 using System.Threading;
 using Devsense.PHP.Syntax;
+using System.Globalization;
+using Pchp.CodeAnalysis.DocumentationComments;
+using Peachpie.CodeAnalysis.Symbols;
 
 namespace Pchp.CodeAnalysis.Symbols
 {
     /// <summary>
     /// The class to represent all types imported from a PE/module.
     /// </summary>
-    internal abstract class PENamedTypeSymbol : NamedTypeSymbol, IPhpTypeSymbol
+    internal abstract class PENamedTypeSymbol : NamedTypeSymbol, IPhpTypeSymbol, IPhpScriptTypeSymbol
     {
         #region IPhpTypeSymbol
 
         /// <summary>
         /// Gets fully qualified name of the class.
         /// </summary>
-        public QualifiedName FullName => new QualifiedName(new Name(_name), _ns.Split('.').Select(s => new Name(s)).ToArray(), true);
+        public QualifiedName FullName
+        {
+            get
+            {
+                return this.TryGetPhpTypeAttribute(out var fullname, out _) ? fullname : this.MakeQualifiedName();
+            }
+        }
 
         /// <summary>
         /// Optional.
         /// A field holding a reference to current runtime context.
-        /// Is of type <see cref="Pchp.Core.Context"/>.
+        /// Is of type <c>Context</c>.
         /// </summary>
-        public FieldSymbol ContextStore
+        public IFieldSymbol ContextStore
         {
             get
             {
-                if (!this.IsStatic)
-                {
-                    // resolve <ctx> field
-                    var candidates = this.GetMembers(SpecialParameterSymbol.ContextName)
-                        .OfType<FieldSymbol>()
-                        .Where(f => f.DeclaredAccessibility == Accessibility.Protected && !f.IsStatic && f.Type.MetadataName == "Context")
-                        .ToList();
+                IFieldSymbol resolved;
 
-                    Debug.Assert(candidates.Count <= 1);
-                    if (candidates.Count != 0)
+                if (this.IsStatic)
+                {
+                    resolved = null;
+                }
+                else
+                {
+                    resolved = (this.BaseType as IPhpTypeSymbol)?.ContextStore;
+                    if (resolved == null)
                     {
-                        return candidates[0];
+                        // resolve <ctx> field
+                        var possiblemembers =
+                            this.GetMembers(SpecialParameterSymbol.ContextName) // <ctx>
+                            .Concat(this.GetMembers("_ctx")); // _ctx
+
+                        resolved = possiblemembers
+                            .OfType<FieldSymbol>()
+                            .FirstOrDefault(f => f.DeclaredAccessibility == Accessibility.Protected && !f.IsStatic && f.Type.MetadataName == "Context");
                     }
                 }
 
-                return (this.BaseType as IPhpTypeSymbol)?.ContextStore;
+                return resolved;
             }
         }
 
         /// <summary>
         /// Optional.
         /// A field holding array of the class runtime fields.
-        /// Is of type <see cref="Pchp.Core.PhpArray"/>.
+        /// Is of type <c>PhpArray</c>.
         /// </summary>
-        public FieldSymbol RuntimeFieldsStore
+        public IFieldSymbol RuntimeFieldsStore
         {
             get
             {
@@ -88,22 +105,68 @@ namespace Pchp.CodeAnalysis.Symbols
         }
 
         /// <summary>
-        /// Optional.
-        /// A method <c>.phpnew</c> that ensures the initialization of the class without calling the base type constructor.
+        /// Optional. A <c>.ctor</c> that ensures the initialization of the class without calling the type PHP constructor.
         /// </summary>
-        public MethodSymbol InitializeInstanceMethod => GetMembers(WellKnownPchpNames.PhpNewMethodName).OfType<MethodSymbol>().SingleOrDefault();
+        public IMethodSymbol InstanceConstructorFieldsOnly => InstanceConstructors.Where(ctor => ctor.IsInitFieldsOnly).SingleOrDefault();
 
-        /// <summary>
-        /// Optional.
-        /// A nested class <c>__statics</c> containing class static fields and constants which are bound to runtime context.
-        /// </summary>
-        public NamedTypeSymbol StaticsContainer
+        public abstract bool IsTrait { get; }
+
+        public byte AutoloadFlag
         {
             get
             {
-                return this.GetTypeMembers(WellKnownPchpNames.StaticsHolderClassName)
-                    .Where(t => !t.IsStatic && t.DeclaredAccessibility == Accessibility.Public && t.Arity == 0)
-                    .SingleOrDefault();
+                if (this.TryGetPhpTypeAttribute(out _, out _, out var autoload))
+                {
+                    return autoload;
+                }
+
+                // not applicable:
+                return 0;
+            }
+        }
+
+        #endregion
+
+        #region IPhpScriptTypeSymbol // applies when [PhpScriptAttributes] and <Main> method are declared
+
+        /// <summary>
+        /// Gets method symbol representing the script entry point.
+        /// The method's signature corresponds to <c>runtime:Context.MainDelegate</c> (Context ctx, PhpArray locals, object @this, RuntimeTypeHandle self).
+        /// </summary>
+        IMethodSymbol IPhpScriptTypeSymbol.MainMethod
+        {
+            get
+            {
+                if (this.DeclaredAccessibility == Accessibility.Public && this.IsStatic)
+                {
+                    var method = GetMembers(WellKnownPchpNames.GlobalRoutineName).OfType<IMethodSymbol>().SingleOrDefault();
+                    Debug.Assert(method == null || (method.Parameters.Length == 4 && method.IsStatic && method.DeclaredAccessibility == Accessibility.Public));
+
+                    return method;
+                }
+
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Script's relative path to the application root.
+        /// </summary>
+        string IPhpScriptTypeSymbol.RelativeFilePath
+        {
+            get
+            {
+                if (this.DeclaredAccessibility == Accessibility.Public && this.IsStatic)
+                {
+                    // [ScriptAtribute( string file_path )]
+                    var scriptattr = this.GetPhpScriptAttribute();
+                    if (scriptattr != null)
+                    {
+                        return (string)scriptattr.ConstructorArguments[0].Value;
+                    }
+                }
+
+                return null;
             }
         }
 
@@ -134,6 +197,8 @@ namespace Pchp.CodeAnalysis.Symbols
                     return 0;
                 }
             }
+
+            public override bool IsTrait => false; // trait is always a generic class
 
             internal override bool MangleName
             {
@@ -167,6 +232,20 @@ namespace Pchp.CodeAnalysis.Symbols
             private readonly ushort _arity;
             private readonly bool _mangleName;
             private ImmutableArray<TypeParameterSymbol> _lazyTypeParameters;
+            private byte _istraitflag;
+
+            public override bool IsTrait
+            {
+                get
+                {
+                    if (_istraitflag == 0)
+                    {
+                        _istraitflag = AttributeHelpers.HasPhpTraitAttribute(Handle, ContainingPEModule) ? (byte)1 : (byte)2;
+                    }
+
+                    return _istraitflag == 1;
+                }
+            }
 
             internal PENamedTypeSymbolGeneric(
                     PEModuleSymbol moduleSymbol,
@@ -434,6 +513,8 @@ namespace Pchp.CodeAnalysis.Symbols
         readonly TypeDefinitionHandle _handle;
         readonly NamespaceOrTypeSymbol _container;
         readonly TypeAttributes _flags;
+
+        ImmutableArray<AttributeData> _lazyCustomAttributes;
         readonly string _name;
         string _ns;
         readonly SpecialType _corTypeId;
@@ -460,6 +541,12 @@ namespace Pchp.CodeAnalysis.Symbols
         Dictionary<string, ImmutableArray<Symbol>> _lazyMembersByName;
 
         /// <summary>
+        /// A map of members immediately contained within this type 
+        /// grouped by their PHP name (case-insensitively, without special suffixes).
+        /// </summary>
+        Dictionary<string, ImmutableArray<Symbol>> _lazyMembersByPhpName;
+
+        /// <summary>
         /// A map of types immediately contained within this type 
         /// grouped by their name (case-sensitively).
         /// </summary>
@@ -467,7 +554,11 @@ namespace Pchp.CodeAnalysis.Symbols
 
         TypeKind _lazyKind;
 
+        private NullableContextKind _lazyNullableContextValue;
+
         NamedTypeSymbol _lazyUnderlayingType;
+
+        private KeyValuePair<CultureInfo, string> _lazyDocComment;
 
         private NamedTypeSymbol _lazyDeclaredBaseType = ErrorTypeSymbol.UnknownResultType;
         private ImmutableArray<NamedTypeSymbol> _lazyDeclaredInterfaces = default(ImmutableArray<NamedTypeSymbol>);
@@ -610,11 +701,25 @@ namespace Pchp.CodeAnalysis.Symbols
             throw new NotImplementedException();
         }
 
+        public override ImmutableArray<AttributeData> GetAttributes()
+        {
+            if (_lazyCustomAttributes.IsDefault)
+            {
+                this.ContainingPEModule.LoadCustomAttributes(this.Handle, ref _lazyCustomAttributes);
+            }
+
+            return _lazyCustomAttributes;
+        }
+
         public override SpecialType SpecialType => _corTypeId;
 
         public override string Name => _name;
 
         public override string NamespaceName => _ns;
+
+        internal override bool HasTypeArgumentsCustomModifiers => false;
+
+        public override ImmutableArray<CustomModifier> GetTypeArgumentCustomModifiers(int ordinal) => GetEmptyTypeArgumentCustomModifiers(ordinal);
 
         internal PEModuleSymbol ContainingPEModule
         {
@@ -631,7 +736,7 @@ namespace Pchp.CodeAnalysis.Symbols
             }
         }
 
-        internal override IModuleSymbol ContainingModule
+        internal override ModuleSymbol ContainingModule
         {
             get
             {
@@ -742,9 +847,8 @@ namespace Pchp.CodeAnalysis.Symbols
                         if ((fieldFlags & FieldAttributes.Static) == 0)
                         {
                             // Instance field used to determine underlying type.
-                            bool isVolatile;
                             ImmutableArray<ModifierInfo<TypeSymbol>> customModifiers;
-                            TypeSymbol type = decoder.DecodeFieldSignature(fieldDef, out isVolatile, out customModifiers);
+                            TypeSymbol type = decoder.DecodeFieldSignature(fieldDef, out customModifiers);
 
                             if (type.SpecialType.IsValidEnumUnderlyingType())
                             {
@@ -892,12 +996,37 @@ namespace Pchp.CodeAnalysis.Symbols
             return m;
         }
 
+        public override ImmutableArray<Symbol> GetMembersByPhpName(string name)
+        {
+            if (!EnsurePhpMembers().TryGetValue(name, out var m))
+            {
+                m = ImmutableArray<Symbol>.Empty;
+            }
+
+            return m;
+        }
+
         private void EnsureAllMembersAreLoaded()
         {
             if (_lazyMembersByName == null)
             {
                 LoadMembers();
             }
+        }
+
+        private Dictionary<string, ImmutableArray<Symbol>> EnsurePhpMembers()
+        {
+            if (_lazyMembersByPhpName == null)
+            {
+                EnsureAllMembersAreLoaded();
+                Interlocked.CompareExchange(ref _lazyMembersByPhpName,
+                    Roslyn.Utilities.EnumerableExtensions.ToDictionary(
+                        _lazyMembersInDeclarationOrder
+                            .Where(x => x is MethodSymbol || x is FieldSymbol), // TODO: PropertySymbol ????
+                        x => x.PhpName(), StringComparer.InvariantCultureIgnoreCase),
+                    null);
+            }
+            return _lazyMembersByPhpName;
         }
 
         private void EnsureNestedTypesAreLoaded()
@@ -1411,6 +1540,8 @@ namespace Pchp.CodeAnalysis.Symbols
             }
         }
 
+        public override bool IsSerializable => (_flags & TypeAttributes.Serializable) != 0;
+
         internal override bool IsMetadataSealed => (_flags & TypeAttributes.Sealed) != 0;
 
         internal TypeAttributes Flags => _flags;
@@ -1500,5 +1631,32 @@ namespace Pchp.CodeAnalysis.Symbols
                 return _lazyKind;
             }
         }
+
+        public override string GetDocumentationCommentXml(CultureInfo preferredCulture = null, bool expandIncludes = false, CancellationToken cancellationToken = default(CancellationToken))
+        {
+            return PEDocumentationCommentUtils.GetDocumentationComment(this, ContainingPEModule, preferredCulture, cancellationToken, ref _lazyDocComment);
+        }
+
+        #region Nullability
+
+        internal override byte? GetNullableContextValue()
+        {
+            byte? value;
+            if (!_lazyNullableContextValue.TryGetByte(out value))
+            {
+                value = ContainingPEModule.Module.HasNullableContextAttribute(_handle, out byte arg) ?
+                    arg :
+                    _container.GetNullableContextValue();
+                _lazyNullableContextValue = value.ToNullableContextFlags();
+            }
+            return value;
+        }
+
+        internal override byte? GetLocalNullableContextValue()
+        {
+            throw ExceptionUtilities.Unreachable;
+        }
+
+        #endregion
     }
 }
